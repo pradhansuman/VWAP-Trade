@@ -30,14 +30,22 @@
   var ASSETS = {
     nifty: {
       key: 'nifty', name: 'Nifty 50', code: '^NSEI', tz: 'Asia/Kolkata', dp: 2,
-      refreshSec: 300, legend: 'NSE · 15-minute bars', unit: 'pts'
+      refreshSec: 300, interval: '15m', legend: 'NSE · 15-minute bars', unit: 'pts'
+    },
+    banknifty: {
+      key: 'banknifty', name: 'Bank Nifty', code: '^NSEBANK', tz: 'Asia/Kolkata', dp: 2,
+      refreshSec: 300, interval: '15m', legend: 'NSE · 15-minute bars', unit: 'pts'
+    },
+    sensex: {
+      key: 'sensex', name: 'Sensex', code: '^BSESN', tz: 'Asia/Kolkata', dp: 2,
+      refreshSec: 300, interval: '15m', legend: 'BSE · 15-minute bars', unit: 'pts'
     },
     btc: {
       key: 'btc', name: 'Bitcoin', code: 'BTCUSDT', tz: 'UTC', dp: 2,
-      refreshSec: 60, legend: 'Binance · 5-minute bars', unit: 'USDT'
+      refreshSec: 60, interval: '5m', legend: 'Binance · 5-minute bars', unit: 'USDT'
     }
   };
-  var KEYS = ['nifty', 'btc'];
+  var KEYS = ['nifty', 'banknifty', 'sensex', 'btc'];
 
   /* ---------------- state ---------------- */
   var state = {
@@ -46,7 +54,7 @@
     countdown: {},     // key -> seconds left
     result: {},        // key -> engine result
     hidden: {},        // key -> {seriesName:bool}
-    demoSeed: { nifty: 20260902, btc: 21 },
+    demoSeed: { nifty: 20260902, banknifty: 777, sensex: 555, btc: 21 },
     timers: { demo: null, tick: null }
   };
 
@@ -94,14 +102,14 @@
     return tryNext();
   }
 
-  function fetchNifty() {
-    var t1 = 'https://query1.finance.yahoo.com/v8/finance/chart/%5ENSEI?interval=15m&range=5d';
-    var t2 = 'https://query2.finance.yahoo.com/v8/finance/chart/%5ENSEI?interval=15m&range=5d';
+  function fetchYahoo(a) {
+    var u1 = 'https://query1.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent(a.code) + '?interval=' + a.interval + '&range=5d';
+    var u2 = 'https://query2.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent(a.code) + '?interval=' + a.interval + '&range=5d';
     var attempts = [
-      { name: 'Yahoo (via relay)', url: 'https://api.allorigins.win/raw?url=' + encodeURIComponent(t1), wrap: false },
-      { name: 'Yahoo (via relay)', url: 'https://corsproxy.io/?url=' + encodeURIComponent(t1), wrap: false },
-      { name: 'Yahoo (via relay)', url: 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(t1), wrap: false },
-      { name: 'Yahoo (via relay)', url: 'https://api.allorigins.win/get?url=' + encodeURIComponent(t2), wrap: true }
+      { name: 'Yahoo (via relay)', url: 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u1), wrap: false },
+      { name: 'Yahoo (via relay)', url: 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(u1), wrap: false },
+      { name: 'Yahoo (via relay)', url: 'https://api.allorigins.win/get?url=' + encodeURIComponent(u2), wrap: true },
+      { name: 'Yahoo (via relay)', url: 'https://corsproxy.io/?url=' + encodeURIComponent(u2), wrap: false }
     ];
     var i = 0;
     function tryNext() {
@@ -119,7 +127,7 @@
           candles.push({ t: res.timestamp[k] * 1000, o: o, h: h, l: l, c: c, v: (v || 0) });
         }
         if (candles.length < 50) throw new Error('Too few bars returned');
-        return { candles: candles, source: a.name + ' · NSEI · 15m' };
+        return { candles: candles, source: a.name + ' · ' + a.code + ' · ' + a.interval };
       }).catch(function (err) {
         if (i >= attempts.length) throw err;
         return tryNext();
@@ -139,26 +147,29 @@
   }
   function demoCandles(key) {
     var a = ASSETS[key];
+    var cfg = {
+      nifty: { base: 24800, vol: 0.0013, n: 480, step: 15 * 60000, bigK: 3.8, baseV: 90000 },
+      banknifty: { base: 51500, vol: 0.0018, n: 480, step: 15 * 60000, bigK: 3.8, baseV: 60000 },
+      sensex: { base: 81000, vol: 0.0012, n: 480, step: 15 * 60000, bigK: 3.8, baseV: 50000 },
+      btc: { base: 68000, vol: 0.0021, n: 900, step: 5 * 60000, bigK: 4.5, baseV: 120 }
+    }[key];
     var rnd = mulberry32(state.demoSeed[key]);
-    var isBtc = key === 'btc';
-    var step = isBtc ? 5 * 60000 : 15 * 60000;
-    var n = isBtc ? 900 : 480;
-    var px = isBtc ? 68000 : 24800;
-    var vol = isBtc ? 0.0021 : 0.0013;
-    var out = [], drift = 0, regime = 0;
+    var px = cfg.base, vol = cfg.vol, n = cfg.n, step = cfg.step;
+    var out = [], drift = 0, regime = 0, w = 0;
     var t0 = Date.now() - n * step;
     for (var i = 0; i < n; i++) {
-      if (rnd() < 0.02) regime = (rnd() - 0.5) * (isBtc ? 4 : 2.5);
-      drift = drift * 0.97 + regime * vol * 0.35;
+      if (rnd() < 0.02) regime = (rnd() - 0.5) * 2;
+      w = w * 0.995 + regime * vol * 0.5;               // bounded trend state
+      w = Math.max(-0.10, Math.min(0.10, w));           // stay within ±10% of base
+      var anchor = cfg.base * Math.exp(w);
       var o = px;
       var shock = (rnd() + rnd() + rnd() - 1.5) * vol;
-      var c = o * (1 + drift + shock);
+      var c = o + (anchor - o) * 0.35 + o * shock * 0.7;
       var wick = Math.abs(shock) * o * (0.6 + rnd());
       var h = Math.max(o, c) + wick * rnd();
       var l = Math.min(o, c) - wick * rnd();
-      var baseV = isBtc ? 120 : 90000;
-      var v = baseV * (0.4 + rnd() * 1.2);
-      if (rnd() < 0.045) v *= (isBtc ? 4.5 : 3.8) * (0.7 + rnd()); // big-player bursts
+      var v = cfg.baseV * (0.4 + rnd() * 1.2);
+      if (rnd() < 0.045) v *= cfg.bigK * (0.7 + rnd()); // big-player bursts
       out.push({ t: t0 + i * step, o: o, h: h, l: l, c: c, v: v });
       px = c;
     }
@@ -532,7 +543,7 @@
   function loadAsset(key, manual) {
     var a = ASSETS[key];
     setState(key, 'loading');
-    var fetcher = key === 'btc' ? fetchBTC() : fetchNifty();
+    var fetcher = key === 'btc' ? fetchBTC() : fetchYahoo(ASSETS[key]);
     return fetcher.then(function (r) {
       state.data[key] = { candles: r.candles, source: r.source, fetchedAt: Date.now(), stale: false, demo: false };
       state.countdown[key] = a.refreshSec;

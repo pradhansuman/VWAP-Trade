@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>VWAP Precision Signals — Nifty 50 &amp; Bitcoin Buy/Sell</title>
-  <meta name="description" content="Four-rule VWAP signal desk for Nifty 50 and Bitcoin: time-based VWAP snap-backs, anchored VWAP trend warnings, previous-day VWAP close targets, and T-Size big-player divergence — plus the matching Pine Script indicator." />
+  <title>VWAP Precision Signals — Nifty 50, Bank Nifty, Sensex &amp; Bitcoin</title>
+  <meta name="description" content="Four-rule VWAP signal desk for Nifty 50, Bank Nifty, Sensex and Bitcoin: time-based VWAP snap-backs, anchored VWAP trend warnings, previous-day VWAP close targets, and T-Size big-player divergence — plus the matching Pine Script indicator." />
   <!--
     Discovery:
       deliverable: single-page trading signal desk (web, responsive)
@@ -58,7 +58,7 @@
 
     <header class="hero-head">
       <h1>Buy or sell, <em>scored</em> by four VWAP rules.</h1>
-      <p>Live Nifty 50 and Bitcoin readings from four complementary VWAP signals — the daily scoreboard, the trend anchor, yesterday's closing wall, and where the big players are parked. Every verdict shows its math. Ideas, not advice.</p>
+      <p>Live Nifty 50, Bank Nifty, Sensex and Bitcoin readings from four complementary VWAP signals — the daily scoreboard, the trend anchor, yesterday's closing wall, and where the big players are parked. Every verdict shows its math. Ideas, not advice.</p>
     </header>
 
     <section id="signals" aria-label="Live signals">
@@ -111,7 +111,103 @@
           </div>
         </article>
 
-        <!-- ================= BITCOIN ================= -->
+        <!-- ================= BANK NIFTY ================= -->
+        <article class="panel" id="panel-banknifty">
+          <div class="panel-head">
+            <div class="asset-id">
+              <div class="asset-code">NSEBANK · Index · 15m bars</div>
+              <h2 class="asset-name">Bank Nifty</h2>
+              <div class="price-row">
+                <span class="price" id="price-banknifty">—</span>
+                <span class="delta" id="chg-banknifty">—</span>
+              </div>
+            </div>
+            <div class="verdict-box">
+              <span class="signal-badge sig-wait" id="badge-banknifty" aria-live="polite">WAIT</span>
+              <div class="conf-row">
+                <span class="conf-bar"><i id="confbar-banknifty"></i></span>
+                <span id="confv-banknifty">—</span>
+              </div>
+              <div class="conf-row"><span>composite score</span><span class="score-chip" id="score-banknifty">—</span></div>
+            </div>
+          </div>
+
+          <div id="state-banknifty" aria-live="polite"></div>
+
+          <div class="rules" id="rules-banknifty"></div>
+          <div class="plan" id="plan-banknifty" aria-label="Trade plan"></div>
+
+          <div class="chart-shell">
+            <div class="chart-top">
+              <span class="chart-title">Price vs the four VWAP levels</span>
+              <div class="legend" id="legend-banknifty"></div>
+            </div>
+            <div class="chart-holder">
+              <canvas class="chart" id="chart-banknifty" role="img" aria-label="Bank Nifty line chart with session VWAP, two-sigma bands, anchored VWAP, T-Size VWAP and previous session VWAP close"></canvas>
+              <button type="button" class="expand-btn" id="expand-banknifty" aria-label="Expand Bank Nifty chart">
+                <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M1 6V1h5M15 10v5h-5M10 1h5v5M6 15H1v-5"/></svg>
+              </button>
+              <div class="chart-tip" id="tip-banknifty" hidden></div>
+            </div>
+          </div>
+
+          <div class="panel-meta">
+            <span id="meta-banknifty"></span>
+            <span class="meta-dot" aria-hidden="true">·</span>
+            <span>next refresh <b id="cd-banknifty">—</b></span>
+          </div>
+        </article>
+
+        
+      <!-- ================= SENSEX ================= -->
+        <article class="panel" id="panel-sensex">
+          <div class="panel-head">
+            <div class="asset-id">
+              <div class="asset-code">BSESN · Index · 15m bars</div>
+              <h2 class="asset-name">Sensex</h2>
+              <div class="price-row">
+                <span class="price" id="price-sensex">—</span>
+                <span class="delta" id="chg-sensex">—</span>
+              </div>
+            </div>
+            <div class="verdict-box">
+              <span class="signal-badge sig-wait" id="badge-sensex" aria-live="polite">WAIT</span>
+              <div class="conf-row">
+                <span class="conf-bar"><i id="confbar-sensex"></i></span>
+                <span id="confv-sensex">—</span>
+              </div>
+              <div class="conf-row"><span>composite score</span><span class="score-chip" id="score-sensex">—</span></div>
+            </div>
+          </div>
+
+          <div id="state-sensex" aria-live="polite"></div>
+
+          <div class="rules" id="rules-sensex"></div>
+          <div class="plan" id="plan-sensex" aria-label="Trade plan"></div>
+
+          <div class="chart-shell">
+            <div class="chart-top">
+              <span class="chart-title">Price vs the four VWAP levels</span>
+              <div class="legend" id="legend-sensex"></div>
+            </div>
+            <div class="chart-holder">
+              <canvas class="chart" id="chart-sensex" role="img" aria-label="Sensex line chart with session VWAP, two-sigma bands, anchored VWAP, T-Size VWAP and previous session VWAP close"></canvas>
+              <button type="button" class="expand-btn" id="expand-sensex" aria-label="Expand Sensex chart">
+                <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M1 6V1h5M15 10v5h-5M10 1h5v5M6 15H1v-5"/></svg>
+              </button>
+              <div class="chart-tip" id="tip-sensex" hidden></div>
+            </div>
+          </div>
+
+          <div class="panel-meta">
+            <span id="meta-sensex"></span>
+            <span class="meta-dot" aria-hidden="true">·</span>
+            <span>next refresh <b id="cd-sensex">—</b></span>
+          </div>
+        </article>
+
+        
+      <!-- ================= BITCOIN ================= -->
         <article class="panel" id="panel-btc">
           <div class="panel-head">
             <div class="asset-id">
@@ -326,7 +422,7 @@
           <h4>Data sources</h4>
           <ul>
             <li>Binance public market data — BTCUSDT, 5-minute bars.</li>
-            <li>Yahoo Finance public quotes — NSEI, 15-minute bars (relayed through public CORS proxies).</li>
+            <li>Yahoo Finance public quotes — NSEI, NSEBANK and BSESN, 15-minute bars (relayed through public CORS proxies).</li>
             <li>Demo mode — clearly labeled synthetic data for exploring the logic.</li>
           </ul>
         </div>
