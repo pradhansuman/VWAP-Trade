@@ -55,6 +55,7 @@
     result: {},        // key -> engine result
     hidden: {},        // key -> {seriesName:bool}
     opt: {},           // key -> option-desk state (indices only)
+    demoOpt: {},       // key -> synthetic option state (demo mode)
     prevVerdict: {},   // key -> last verdict (for flip alerts)
     alertSeen: {},     // dedupe set for ticker
     seenQueue: [],
@@ -195,6 +196,21 @@
       if (Math.random() < 0.06) nb.v *= 4;
       cs.push(nb);
       if (cs.length > 1100) cs.shift();
+      // synthetic option-desk walk + option call alerts
+      if (key !== 'btc' && state.demoOpt[key]) {
+        var o = state.demoOpt[key];
+        o.prevCeAsk = o.ce.ask; o.prevPeAsk = o.pe.ask;
+        var jump = function () {
+          var mag = Math.random() < 0.25 ? 2.5 : 0.5;
+          return mag * (Math.random() - 0.45) * 0.06;
+        };
+        o.ce.ask = Math.max(5, o.ce.ask * (1 + jump()));
+        o.pe.ask = Math.max(5, o.pe.ask * (1 + jump()));
+        o.ce.ltp = o.ce.ask * 0.985;
+        o.pe.ltp = o.pe.ask * 0.985;
+        evaluateOptionAlerts(key, o.atm, o.expiry, o.ce, o.pe, o.prevCeAsk, o.prevPeAsk);
+        state.opt[key] = { status: 'ok', expiry: o.expiry, spot: c, atm: o.atm, rows: [{ strike: o.atm, ce: o.ce, pe: o.pe }], updatedAt: Date.now() };
+      }
       renderAsset(key);
     });
   }
@@ -343,15 +359,7 @@
       $('#meta-' + key).appendChild(el('span', '', 'last trigger: ' + lastEvent.label + ' (' + ago + ' bars ago)'));
     }
 
-    // ticker alerts: recent rule events + verdict flips
-    res.events.slice(-3).forEach(function (ev) {
-      var t = d.candles[ev.i] ? d.candles[ev.i].t : null;
-      pushAlert(key, ev.rule + ' · ' + ev.label, t, ev.i);
-    });
-    if (state.prevVerdict[key] && state.prevVerdict[key] !== res.verdict) {
-      pushAlert(key, 'Verdict flipped to ' + res.verdict + (res.verdict !== 'WAIT' ? ' (score ' + (res.score >= 0 ? '+' : '') + res.score.toFixed(2) + ')' : ''), d.candles[res.evalIdx].t, 'v' + res.evalIdx, res.verdict === 'BUY' ? 'up' : res.verdict === 'SELL' ? 'down' : '');
-    }
-    state.prevVerdict[key] = res.verdict;
+    // ticker alerts are option-driven now (see refreshOptionDesk / demo path)
 
     drawChart(key);
     renderOptionDesk(key);
@@ -582,15 +590,33 @@
     KEYS.forEach(function (k) { loadAsset(k, manual); });
   }
 
+  function resetAlerts() {
+    alertFeed.splice(0, alertFeed.length);
+    state.alertSeen = {};
+    state.seenQueue = [];
+    rebuildTicker();
+  }
+
   function startDemo() {
     stopLiveTimers();
     state.mode = 'demo';
+    state.demoOpt = {};
+    resetAlerts();
     syncModeUI();
     KEYS.forEach(function (k) {
       var r = demoCandles(k);
       state.data[k] = { candles: r.candles, source: r.source + ' · DEMO', fetchedAt: Date.now(), stale: false, demo: true };
-      renderAsset(k);
     });
+    // seed synthetic option desks for the three indices
+    var STRIDE = { nifty: 50, banknifty: 100, sensex: 100 };
+    var OPTBASE = { nifty: { ce: 185, pe: 178 }, banknifty: { ce: 460, pe: 445 }, sensex: { ce: 395, pe: 385 } };
+    ['nifty', 'banknifty', 'sensex'].forEach(function (k) {
+      var spot = state.data[k].candles[state.data[k].candles.length - 1].c;
+      var atm = Math.round(spot / STRIDE[k]) * STRIDE[k];
+      var ob = OPTBASE[k];
+      state.demoOpt[k] = { atm: atm, expiry: 'demo-weekly', ce: { ltp: ob.ce, ask: ob.ce * 1.005 }, pe: { ltp: ob.pe, ask: ob.pe * 1.005 } };
+    });
+    KEYS.forEach(function (k) { renderAsset(k); });
     state.timers.demo = setInterval(stepDemo, 4000);
     flashStatus('Demo mode — synthetic data, animated. Switch back to LIVE anytime.');
   }
@@ -598,6 +624,8 @@
   function goLive() {
     stopLiveTimers();
     state.mode = 'live';
+    state.demoOpt = {};
+    resetAlerts();
     syncModeUI();
     loadAll(false);
   }
@@ -691,13 +719,49 @@
     st.fetching = true; st.status = 'loading'; st.error = null;
     renderOptionDesk(key);
     var und = UNDERLYING[key];
-    proxyFetch('/option/contract?underlying_instrument=' + encodeURIComponent(und), { method: 'PUT', body: { underlying_instrument: und } })
-      .then(function (j) {
-        var d = j.data || {};
-        var calls = d.call_options || [], puts = d.put_options || [];
-        if (!calls.length) throw new Error('empty option chain returned');
+
+    // Upstox: PUT /v2/option/chain is the full-chain endpoint; GET /v2/option/contract
+    // (flat list, no premiums) is the fallback.
+    function fetchChain() {
+      return proxyFetch('/option/chain', { method: 'PUT', body: { underlying_instrument: und } })
+        .then(function (j) {
+          var d = j.data || {};
+          var calls = d.call_options || [], puts = d.put_options || [];
+          if (!calls.length) throw new Error('empty option chain returned');
+          return { calls: calls, puts: puts, expiry: d.expiry || d.expiry_date || (calls[0] && (calls[0].expiry || calls[0].expiry_date)) || '', embedded: true };
+        })
+        .catch(function (err) {
+          if (err && err.message === 'token-expired') throw err;
+          return proxyFetch('/option/contract?underlying_instrument=' + encodeURIComponent(und))
+            .then(function (j) {
+              var list = (j.data && (j.data.items || j.data)) || [];
+              if (!Array.isArray(list) || !list.length) throw new Error('no option contracts returned');
+              var calls = [], puts = [];
+              list.forEach(function (c) {
+                var type = c.instrument_type || String(c.tradingsymbol || '').slice(-2);
+                if (type === 'CE') calls.push({ strike_price: c.strike_price, instrument_key: c.instrument_key, expiry: c.expiry });
+                else if (type === 'PE') puts.push({ strike_price: c.strike_price, instrument_key: c.instrument_key, expiry: c.expiry });
+              });
+              if (!calls.length) throw new Error('no calls in contract list');
+              return { calls: calls, puts: puts, expiry: (calls[0] && calls[0].expiry) || '', embedded: false };
+            });
+        });
+    }
+
+    function chainQuote(entry) {
+      if (!entry) return null;
+      var md = entry.option_market_data || {};
+      var ask = md.ask_price != null ? md.ask_price : (md.ask != null ? md.ask : null);
+      var ltp = md.ltp != null ? md.ltp : null;
+      if (ltp == null && ask == null) return null;
+      return { ltp: ltp != null ? ltp : ask, ask: ask != null ? ask : ltp };
+    }
+
+    return fetchChain()
+      .then(function (chain) {
+        var calls = chain.calls, puts = chain.puts;
         var strikes = calls.map(function (c) { return +c.strike_price; }).sort(function (a, b) { return a - b; });
-        st.expiry = d.expiry_date || (calls[0] && (calls[0].expiry || calls[0].expiry_date)) || '';
+        st.expiry = chain.expiry;
         return proxyFetch('/market-quote/quotes?instrument_key=' + encodeURIComponent(und))
           .then(function (q) {
             var spot = extractQuote(q, und);
@@ -707,22 +771,37 @@
             st.atm = atm;
             var stepv = stepGuess(strikes);
             var wanted = strikes.filter(function (s) { return Math.abs(s - atm) <= 2 * stepv; }).slice(0, 5);
-            var rows = wanted.map(function (s) {
-              var c = null, p = null;
-              for (var ci = 0; ci < calls.length; ci++) if (+calls[ci].strike_price === s) { c = calls[ci]; break; }
-              for (var pi = 0; pi < puts.length; pi++) if (+puts[pi].strike_price === s) { p = puts[pi]; break; }
-              return { strike: s, ceKey: c && c.instrument_key, peKey: p && p.instrument_key };
-            });
-            var keys = [];
-            rows.forEach(function (r) { if (r.ceKey) keys.push(r.ceKey); if (r.peKey) keys.push(r.peKey); });
-            keys.push(und);
-            return proxyFetch('/market-quote/quotes?instrument_key=' + encodeURIComponent(keys.join(',')))
-              .then(function (q2) {
-                rows.forEach(function (r) { r.ce = extractQuote(q2, r.ceKey); r.pe = extractQuote(q2, r.peKey); });
-                var sp = extractQuote(q2, und);
-                if (sp) st.spot = sp.ltp;
-                st.rows = rows; st.status = 'ok'; st.updatedAt = Date.now();
+            function entryFor(arr, s) {
+              for (var i = 0; i < arr.length; i++) if (+arr[i].strike_price === s) return arr[i];
+              return null;
+            }
+            var rows, quoteDone;
+            if (chain.embedded) {
+              rows = wanted.map(function (s) {
+                return { strike: s, ce: chainQuote(entryFor(calls, s)), pe: chainQuote(entryFor(puts, s)) };
               });
+              quoteDone = Promise.resolve(null);
+            } else {
+              rows = wanted.map(function (s) {
+                var c = entryFor(calls, s), p = entryFor(puts, s);
+                return { strike: s, ceKey: c && c.instrument_key, peKey: p && p.instrument_key };
+              });
+              var keys = [];
+              rows.forEach(function (r) { if (r.ceKey) keys.push(r.ceKey); if (r.peKey) keys.push(r.peKey); });
+              quoteDone = proxyFetch('/market-quote/quotes?instrument_key=' + encodeURIComponent(keys.join(',')))
+                .then(function (q2) {
+                  rows.forEach(function (r) { r.ce = extractQuote(q2, r.ceKey); r.pe = extractQuote(q2, r.peKey); });
+                });
+            }
+            return quoteDone.then(function () {
+              var atmRow = rows.filter(function (r) { return r.strike === atm; })[0];
+              if (atmRow) {
+                evaluateOptionAlerts(key, atm, st.expiry, atmRow.ce, atmRow.pe, st.prevCeAsk, st.prevPeAsk);
+                if (atmRow.ce && atmRow.ce.ask != null) st.prevCeAsk = atmRow.ce.ask;
+                if (atmRow.pe && atmRow.pe.ask != null) st.prevPeAsk = atmRow.pe.ask;
+              }
+              st.rows = rows; st.status = 'ok'; st.updatedAt = Date.now();
+            });
           });
       })
       .catch(function (e) {
@@ -764,20 +843,7 @@
     if (st.status === 'loading') html += '<span class="opt-chip">loading…</span>';
     html += '</div>';
 
-    if (!getToken()) {
-      var est = bsATM(state.data[key] ? state.data[key].candles[state.data[key].candles.length - 1].c : 0, daysToExpiry(key), IV_GUESS[key]);
-      var spotNow = state.data[key] ? state.data[key].candles[state.data[key].candles.length - 1].c : null;
-      if (spotNow) {
-        html += '<div class="opt-note">No Upstox token — theoretical Black–Scholes estimate for the ' + fmt(spotNow, 0) + ' ATM strike (assumed IV ' + Math.round(IV_GUESS[key] * 100) + '%, ~' + (daysToExpiry(key) < 1 ? 'expiry day' : Math.round(daysToExpiry(key)) + 'd to expiry') + '):' +
-          ' <b class="up">CE ≈ ₹' + est.ce.toFixed(1) + '</b> · <b class="down">PE ≈ ₹' + est.pe.toFixed(1) + '</b>. Paste a token for live ask prices.</div>';
-      } else {
-        html += '<div class="opt-note">Waiting for price data — the theoretical estimate appears once the index feed loads.</div>';
-      }
-    } else if (st.status === 'error') {
-      html += '<div class="opt-note opt-err">' + st.error + '</div>';
-    } else if (st.status === 'loading') {
-      html += '<div class="opt-note">Fetching option chain from Upstox…</div>';
-    } else if (st.status === 'ok' && st.rows) {
+    if (st.status === 'ok' && st.rows) {
       var atmRow = st.rows.filter(function (r) { return r.strike === st.atm; })[0];
       var lot = LOT[key];
       html += '<div class="opt-spot">Spot ' + fmt(st.spot, a.dp) + ' · ATM ' + fmt(st.atm, 0) + '</div>';
@@ -800,13 +866,45 @@
         html += '<tr' + atmMark + '><td>' + fmt(r.strike, 0) + (r.strike === st.atm ? ' •' : '') + '</td><td>' + (r.ce ? fmt(r.ce.ask, 1) : '—') + '</td><td>' + (r.pe ? fmt(r.pe.ask, 1) : '—') + '</td></tr>';
       });
       html += '</tbody></table>';
-      html += '<div class="opt-note">Buyer pays the ask. Lot size ' + lot + ' (verify on the exchange). Updated ' + (st.updatedAt ? new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit' }).format(st.updatedAt) : '—') + '.</div>';
+      html += '<div class="opt-note">Buyer pays the ask' + (st.expiry === 'demo-weekly' ? ' · demo data' : '') + '. Lot size ' + lot + ' (verify on the exchange). Updated ' + (st.updatedAt ? new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit' }).format(st.updatedAt) : '—') + '.</div>';
+    } else if (!getToken()) {
+      var spotNow = state.data[key] ? state.data[key].candles[state.data[key].candles.length - 1].c : null;
+      if (spotNow) {
+        var est = bsATM(spotNow, daysToExpiry(key), IV_GUESS[key]);
+        html += '<div class="opt-note">No Upstox token — theoretical Black–Scholes estimate for the ' + fmt(spotNow, 0) + ' ATM strike (assumed IV ' + Math.round(IV_GUESS[key] * 100) + '%, ~' + (daysToExpiry(key) < 1 ? 'expiry day' : Math.round(daysToExpiry(key)) + 'd to expiry') + '):' +
+          ' <b class="up">CE ≈ ₹' + est.ce.toFixed(1) + '</b> · <b class="down">PE ≈ ₹' + est.pe.toFixed(1) + '</b>. Paste a token for live ask prices.</div>';
+      } else {
+        html += '<div class="opt-note">Waiting for price data — the theoretical estimate appears once the index feed loads.</div>';
+      }
+    } else if (st.status === 'error') {
+      html += '<div class="opt-note opt-err">' + st.error + '</div>';
+    } else if (st.status === 'loading') {
+      html += '<div class="opt-note">Fetching option chain from Upstox…</div>';
     }
     box.innerHTML = html;
   }
 
-  /* ================= LIVE ALERT TICKER ================= */
+  /* ================= LIVE ALERT TICKER (option buy/sell calls) ================= */
+  var ALERT_PCT = 2.5;      // minimum ask move (%) to fire an alert
+  var AGGRESSIVE_PCT = 6;   // above this the wording says AGGRESSIVE
   var alertFeed = [];
+
+  function evaluateOptionAlerts(key, atm, expiry, ce, pe, prevCeAsk, prevPeAsk) {
+    var a = ASSETS[key];
+    function side(opt, name, prev) {
+      if (!opt || opt.ask == null || prev == null || !isFinite(prev)) return;
+      var chg = (opt.ask - prev) / prev * 100;
+      if (chg >= ALERT_PCT) {
+        var agg = chg >= AGGRESSIVE_PCT ? 'AGGRESSIVE ' : '';
+        pushAlert(key, agg + 'BUYING ' + fmt(atm, 0) + ' ' + name + ' · ask ₹' + fmt(opt.ask, 1) + ' (+' + chg.toFixed(1) + '%)', Date.now(), 'opt|' + key + '|' + name + '|' + atm + '|' + Math.round(chg * 10), 'up');
+      } else if (chg <= -ALERT_PCT) {
+        pushAlert(key, 'SELLING ' + fmt(atm, 0) + ' ' + name + ' · ask ₹' + fmt(opt.ask, 1) + ' (' + chg.toFixed(1) + '%)', Date.now(), 'opt|' + key + '|' + name + '|' + atm + '|' + Math.round(chg * 10), 'down');
+      }
+    }
+    side(ce, 'CE', prevCeAsk);
+    side(pe, 'PE', prevPeAsk);
+  }
+
   function pushAlert(key, text, t, i, cls) {
     var a = ASSETS[key];
     var id = key + '|' + (i == null ? text : i) + '|' + text;
@@ -822,7 +920,11 @@
     var track = $('#tickerTrack');
     if (!track) return;
     if (!alertFeed.length) {
-      track.innerHTML = '<span class="tick-item">Watching four assets — no rule triggers yet. Alerts appear here the moment a rule fires.</span>';
+      track.innerHTML = '<span class="tick-item">' +
+        (getToken()
+          ? 'Live call alerts armed — watching Nifty, Bank Nifty and Sensex option desks. An alert fires when ATM call/put asks move by ' + ALERT_PCT + '%+.'
+          : 'Waiting for live option data — paste your Upstox token to stream buy/sell call alerts (Nifty, Bank Nifty, Sensex).') +
+        '</span>';
       track.style.animation = 'none';
       return;
     }
@@ -916,6 +1018,7 @@
       }
     });
     syncTokenUI();
+    rebuildTicker();
 
     // focus modal
     $('#focusClose').addEventListener('click', closeFocus);

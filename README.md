@@ -45,6 +45,10 @@ Data loads client-side from public endpoints:
 - **Copy & sections** — `index.html`; the rules explainer and scoring table live there as plain HTML.
 - **Pine indicator inputs** — everything is an input in TradingView (session reset, bands, pivot strength, touch zone, big-bar multiple, divergence trigger, signal hold).
 
+## Live option call alerts (ticker)
+
+The scrolling ticker at the top streams **buy/sell pressure alerts on ATM calls and puts** for Nifty, Bank Nifty and Sensex — it fires when the option ask moves **2.5%+ between refreshes** ("AGGRESSIVE" above 6%), e.g. `NIFTY 50 · BUYING 24,800 CE · ask ₹212 (+4.2%)`. Alerts come from Upstox quotes only; without a token the ticker shows an enable note instead of pretending. VWAP rule events are intentionally not on the ticker.
+
 ## Verification
 
 - `engine.js`: 32 unit checks pass (session envelope invariants, band ordering, anchor reset semantics, no-volume fallback, week/month resets, tiny history, empty input, idea sanity).
