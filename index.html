@@ -53,7 +53,7 @@
           <button type="button" data-theme="light" aria-pressed="false">Light</button>
         </div>
         <button type="button" class="btn" id="refreshBtn">Refresh</button>
-        <button type="button" class="btn btn-token" id="tokenBtn"><span class="dot dot-demo" id="tokenDot"></span><span id="tokenLabel">Upstox token</span></button>
+        <button type="button" class="btn btn-token" id="tokenBtn"><span class="dot dot-demo" id="tokenDot"></span><span id="tokenLabel">Connect Upstox</span></button>
       </div>
     </div>
 
@@ -453,20 +453,6 @@
     </footer>
   </main>
 </div>
-
-<!-- upstox token dialog -->
-<dialog id="tokenDialog" class="token-dialog">
-  <form method="dialog">
-    <h3>Upstox access token</h3>
-    <p>Paste your daily <b>Upstox access token</b> to load live option premiums for Nifty, Bank Nifty and Sensex. Tokens expire around 3:30 AM IST, so refresh it each trading day. It is stored only in this browser and sent only to api.upstox.com through a pass-through relay — nothing is saved server-side.</p>
-    <input id="tokenInput" type="password" autocomplete="off" spellcheck="false" placeholder="Paste token (eyJ0eXAiOiJKV1Qi…)" />
-    <menu class="dlg-menu">
-      <button value="cancel" class="btn btn-ghost">Cancel</button>
-      <button value="clear" class="btn">Clear</button>
-      <button value="save" class="btn btn-accent">Save</button>
-    </menu>
-  </form>
-</dialog>
 
 <!-- focus modal -->
 <div class="focus-modal" id="focusModal" hidden role="dialog" aria-modal="true" aria-labelledby="focusTitle">

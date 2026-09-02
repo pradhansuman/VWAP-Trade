@@ -56,6 +56,7 @@
     hidden: {},        // key -> {seriesName:bool}
     opt: {},           // key -> option-desk state (indices only)
     demoOpt: {},       // key -> synthetic option state (demo mode)
+    authOk: false,     // Upstox connected (server-side auth)
     prevVerdict: {},   // key -> last verdict (for flip alerts)
     alertSeen: {},     // dedupe set for ticker
     seenQueue: [],
@@ -649,26 +650,26 @@
   var IV_GUESS = { nifty: 0.12, banknifty: 0.15, sensex: 0.12 };
   var EXPIRY_DOW = { nifty: 2, banknifty: 2, sensex: 4 }; // Tue / Tue / Thu — verify on the exchange site
 
-  function getToken() { return safeLS(function () { return localStorage.getItem('vwap-upstox-token'); }) || ''; }
-  function setToken(t) {
-    safeLS(function () {
-      if (t) localStorage.setItem('vwap-upstox-token', t);
-      else localStorage.removeItem('vwap-upstox-token');
-    });
-    syncTokenUI();
-  }
-  function syncTokenUI() {
-    var has = !!getToken();
-    var dot = $('#tokenDot');
-    if (dot) dot.className = 'dot ' + (has ? 'dot-live' : 'dot-demo');
-    var lbl = $('#tokenLabel');
-    if (lbl) lbl.textContent = has ? 'Token set' : 'Upstox token';
+  var AUTH = 'https://vwap-optproxy.suman20.workers.dev';
+  function pollAuthStatus() {
+    return fetch(AUTH + '/status').then(function (r) { return r.json(); }).then(function (j) {
+      var was = state.authOk;
+      state.authOk = !!j.authorized;
+      var dot = $('#tokenDot');
+      if (dot) dot.className = 'dot ' + (state.authOk ? 'dot-live' : 'dot-demo');
+      var lbl = $('#tokenLabel');
+      if (lbl) lbl.textContent = state.authOk ? 'Upstox connected' : 'Connect Upstox';
+      if (!was && state.authOk) {
+        flashStatus('Upstox connected — loading live option premiums. Tokens renew automatically now.');
+        KEYS.forEach(function (k) { maybeRefreshOptions(k, true); });
+        rebuildTicker();
+      }
+      return state.authOk;
+    }).catch(function () { state.authOk = false; return false; });
   }
 
   function proxyFetch(path, opts) {
     var init = { method: (opts && opts.method) || 'GET', headers: { Accept: 'application/json' } };
-    var token = getToken();
-    if (token) init.headers.Authorization = 'Bearer ' + token;
     if (opts && opts.body) {
       init.body = JSON.stringify(opts.body);
       init.headers['Content-Type'] = 'application/json';
@@ -676,7 +677,7 @@
     return fetch(PROXY + encodeURIComponent('https://api.upstox.com/v2' + path), init)
       .then(function (r) {
         return r.json().catch(function () { return {}; }).then(function (j) {
-          if (r.status === 401) throw new Error('token-expired');
+          if (r.status === 401) throw new Error('not-connected');
           if (!r.ok || j.status === 'error') throw new Error((j.errors && j.errors[0] && j.errors[0].message) || ('HTTP ' + r.status));
           return j;
         });
@@ -707,7 +708,7 @@
 
   function maybeRefreshOptions(key, force) {
     if (key === 'btc') return;
-    if (!getToken()) { renderOptionDesk(key); return; }
+    if (!state.authOk) { renderOptionDesk(key); return; }
     var st = state.opt[key];
     if (st && st.fetching) return;
     if (!force && st && st.status === 'ok' && st.updatedAt && Date.now() - st.updatedAt < 60000) return;
@@ -806,8 +807,10 @@
       })
       .catch(function (e) {
         st.status = 'error';
-        st.error = e.message === 'token-expired'
-          ? 'Upstox token expired — paste a fresh one (tokens expire daily around 3:30 AM IST).'
+        st.error = e.message === 'not-connected'
+          ? 'Upstox not connected — click “Connect Upstox” in the top bar (one-time). Tokens renew automatically afterwards.'
+          : e.message === 'token-expired'
+          ? 'Upstox session expired — click “Connect Upstox” again to re-authorize.'
           : 'Option feed error: ' + e.message;
       })
       .then(function () { st.fetching = false; renderOptionDesk(key); });
@@ -867,12 +870,12 @@
       });
       html += '</tbody></table>';
       html += '<div class="opt-note">Buyer pays the ask' + (st.expiry === 'demo-weekly' ? ' · demo data' : '') + '. Lot size ' + lot + ' (verify on the exchange). Updated ' + (st.updatedAt ? new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit' }).format(st.updatedAt) : '—') + '.</div>';
-    } else if (!getToken()) {
+    } else if (!state.authOk) {
       var spotNow = state.data[key] ? state.data[key].candles[state.data[key].candles.length - 1].c : null;
       if (spotNow) {
         var est = bsATM(spotNow, daysToExpiry(key), IV_GUESS[key]);
-        html += '<div class="opt-note">No Upstox token — theoretical Black–Scholes estimate for the ' + fmt(spotNow, 0) + ' ATM strike (assumed IV ' + Math.round(IV_GUESS[key] * 100) + '%, ~' + (daysToExpiry(key) < 1 ? 'expiry day' : Math.round(daysToExpiry(key)) + 'd to expiry') + '):' +
-          ' <b class="up">CE ≈ ₹' + est.ce.toFixed(1) + '</b> · <b class="down">PE ≈ ₹' + est.pe.toFixed(1) + '</b>. Paste a token for live ask prices.</div>';
+        html += '<div class="opt-note">Upstox not connected — click <b>Connect Upstox</b> (top bar) once; tokens renew automatically afterwards. Theoretical Black–Scholes estimate for the ' + fmt(spotNow, 0) + ' ATM strike (assumed IV ' + Math.round(IV_GUESS[key] * 100) + '%, ~' + (daysToExpiry(key) < 1 ? 'expiry day' : Math.round(daysToExpiry(key)) + 'd to expiry') + '):' +
+          ' <b class="up">CE ≈ ₹' + est.ce.toFixed(1) + '</b> · <b class="down">PE ≈ ₹' + est.pe.toFixed(1) + '</b>.</div>';
       } else {
         html += '<div class="opt-note">Waiting for price data — the theoretical estimate appears once the index feed loads.</div>';
       }
@@ -921,9 +924,9 @@
     if (!track) return;
     if (!alertFeed.length) {
       track.innerHTML = '<span class="tick-item">' +
-        (getToken()
+        (state.authOk
           ? 'Live call alerts armed — watching Nifty, Bank Nifty and Sensex option desks. An alert fires when ATM call/put asks move by ' + ALERT_PCT + '%+.'
-          : 'Waiting for live option data — paste your Upstox token to stream buy/sell call alerts (Nifty, Bank Nifty, Sensex).') +
+          : 'Waiting for live option data — click “Connect Upstox” once to stream buy/sell call alerts (Nifty, Bank Nifty, Sensex).') +
         '</span>';
       track.style.animation = 'none';
       return;
@@ -999,26 +1002,16 @@
       if (state.mode === 'live') loadAll(true); else startDemo();
     });
 
-    // upstox token dialog
-    var dlg = $('#tokenDialog');
+    // upstox connect (one-time OAuth in a new tab; tokens auto-renew server-side)
     $('#tokenBtn').addEventListener('click', function () {
-      $('#tokenInput').value = getToken();
-      dlg.showModal();
+      window.open(AUTH + '/login', '_blank', 'noopener');
+      flashStatus('Complete the Upstox consent in the new tab — this is one-time only.');
     });
-    dlg.addEventListener('close', function () {
-      var v = dlg.returnValue;
-      if (v === 'save') setToken($('#tokenInput').value.trim());
-      else if (v === 'clear') setToken('');
-      if (v === 'save' && getToken()) {
-        flashStatus('Upstox token saved — loading live option premiums.');
-        KEYS.forEach(function (k) { maybeRefreshOptions(k, true); });
-      } else if (v === 'clear') {
-        flashStatus('Token cleared — option desk shows theoretical estimates only.');
-        KEYS.forEach(function (k) { renderOptionDesk(k); });
-      }
-    });
-    syncTokenUI();
+    pollAuthStatus();
+    setInterval(pollAuthStatus, 30000);
+    window.addEventListener('focus', pollAuthStatus);
     rebuildTicker();
+    KEYS.forEach(function (k) { renderOptionDesk(k); });
 
     // focus modal
     $('#focusClose').addEventListener('click', closeFocus);
