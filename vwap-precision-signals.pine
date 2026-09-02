@@ -1,0 +1,248 @@
+//@version=5
+// ============================================================================
+//  VWAP PRECISION SIGNALS (4-Rule Composite)
+//  Rules implemented:
+//   1. Time-Based VWAP  - session reset (Day/Week/Month) + sigma bands.
+//                         Snap-back signal when price re-enters the 2s band.
+//   2. Anchored VWAP    - auto-anchored at confirmed swing lows (or a manual
+//                         date). Close below it = trend may be losing steam.
+//   3. Previous VWAP Close - yesterday's final VWAP as a magnet/target level.
+//                         Touch + reclaim = bullish, touch + rejection = bearish.
+//   4. T-Size VWAP      - VWAP of "big player" bars only (volume > k x SMA50).
+//                         Divergence between big-money VWAP and crowd VWAP is
+//                         an early clue.
+//  Composite score = 0.25*R1 + 0.30*R2 + 0.20*R3 + 0.25*R4  (each -1..+1)
+//  BUY when score >= +0.35, SELL when score <= -0.35, otherwise wait.
+//
+//  NOTE: Rule 4 needs real volume data. On symbols without volume
+//  (e.g. NSE spot index ^NSEI) it shows n/a - use the index futures
+//  (NIFTY1!) or a stock chart instead.
+// ============================================================================
+indicator("VWAP Precision Signals (4-Rule)", shorttitle="VWAP-PREC", overlay=true, max_labels_count=500)
+
+// ------------------------------- Inputs -------------------------------------
+grp1 = "1 · Time-Based VWAP"
+resetPeriod = input.string("Day", "Session reset", options=["Day", "Week", "Month"], group=grp1)
+bandMult1   = input.float(1.0, "Inner band (sigma)", step=0.25, minval=0.25, group=grp1)
+bandMult2   = input.float(2.0, "Outer band (sigma)", step=0.25, minval=0.5,  group=grp1)
+holdBars    = input.int(12, "Signal hold (bars)", minval=1, maxval=100, group=grp1)
+
+grp2 = "2 · Anchored VWAP"
+anchorMode = input.string("Auto (swing lows)", "Anchor mode", options=["Auto (swing lows)", "Manual date"], group=grp2)
+anchorTime = input.time(timestamp("01 Jan 2026 00:00 +0000"), "Manual anchor time (UTC)", group=grp2)
+pivotK     = input.int(5, "Pivot strength (bars each side)", minval=2, maxval=50, group=grp2)
+
+grp3 = "3 · Previous VWAP Close"
+usePrev  = input.bool(true, "Mark previous session VWAP close", group=grp3)
+touchPct = input.float(0.15, "Touch zone (%)", step=0.05, minval=0.0, group=grp3)
+
+grp4 = "4 · T-Size VWAP (big players)"
+bigMult = input.float(3.0, "Big-bar volume multiple of SMA50", step=0.5, minval=1.5, group=grp4)
+divThr  = input.float(0.15, "Divergence trigger (%)", step=0.05, minval=0.05, group=grp4)
+
+grp5 = "Display"
+showTable = input.bool(true, "Show rule dashboard table", group=grp5)
+
+// ------------------------- 1) Time-based session VWAP -----------------------
+tfSes      = resetPeriod == "Day" ? "D" : resetPeriod == "Week" ? "W" : "M"
+newSession = timeframe.change(tfSes)
+
+float v  = nz(volume) > 0 ? volume : 1.0   // equal-weight fallback when the symbol has no volume
+float tp = hlc3
+
+var float cumPV  = 0.0
+var float cumV   = 0.0
+var float cumP2V = 0.0
+if newSession or na(cumV[1])
+    cumPV  := 0.0
+    cumV   := 0.0
+    cumP2V := 0.0
+cumPV  += tp * v
+cumV   += v
+cumP2V += tp * tp * v
+
+float sesVwap = cumV > 0 ? cumPV / cumV : tp
+float sesSig  = math.sqrt(math.max(cumP2V / cumV - sesVwap * sesVwap, 0.0))
+float sigSafe = math.max(sesSig, syminfo.mintick)
+float zNow    = (close - sesVwap) / sigSafe
+
+float up1 = sesVwap + bandMult1 * sesSig
+float lo1 = sesVwap - bandMult1 * sesSig
+float up2 = sesVwap + bandMult2 * sesSig
+float lo2 = sesVwap - bandMult2 * sesSig
+
+// ------------------------- 2) Anchored VWAP ---------------------------------
+float plVal = ta.pivotlow(low, pivotK, pivotK)   // confirmed pivotK bars after the actual low
+
+bool anchorHit = switch anchorMode
+    "Auto (swing lows)" => not na(plVal)
+    "Manual date"       => time >= anchorTime and (na(time[1]) or time[1] < anchorTime)
+    => false
+
+var float aCumPV = na
+var float aCumV  = na
+var float aVwap  = na
+if anchorHit or na(aCumPV)
+    aCumPV := tp * v
+    aCumV  := v
+else
+    aCumPV += tp * v
+    aCumV  += v
+aVwap := aCumPV / aCumV
+
+// ------------------------- 3) Previous session VWAP close -------------------
+var float prevVwapClose = na
+var float lastSesVwap   = na
+if newSession
+    prevVwapClose := lastSesVwap
+lastSesVwap := sesVwap
+
+// ------------------------- 4) T-Size VWAP (big players) ---------------------
+float vSma   = ta.sma(volume, 50)
+bool  hasVol = nz(volume) > 0
+bool  bigBar = hasVol and v > bigMult * vSma
+
+var float tCumPV = 0.0
+var float tCumV  = 0.0
+var float tVwap  = na
+if newSession
+    tCumPV := 0.0
+    tCumV  := 0.0
+if bigBar
+    tCumPV += tp * v
+    tCumV  += v
+tVwap := tCumV > 0 ? tCumPV / tCumV : na
+
+float divg = not na(tVwap) ? (tVwap - sesVwap) / sesVwap : na   // big-money vs crowd
+
+// ------------------------- Rule evaluations ---------------------------------
+// R1 - snap-back mean reversion: price was outside the 2s band, then re-entered.
+bool r1BuyEvt  = zNow[1] <= -bandMult2 and zNow > -bandMult2
+bool r1SellEvt = zNow[1] >=  bandMult2 and zNow <  bandMult2
+bool r1Ext     = math.abs(zNow) >= bandMult2
+
+var float r1Score = 0.0
+var int   r1Age   = 9999
+if r1BuyEvt
+    r1Score := 1.0
+    r1Age   := 0
+else if r1SellEvt
+    r1Score := -1.0
+    r1Age   := 0
+else
+    r1Age += 1
+    if r1Age > holdBars
+        r1Score := 0.0
+
+// R2 - anchored VWAP regime filter.
+bool r2CrossDn = ta.crossunder(close, aVwap)   // warning: trend may be running out of steam
+bool r2CrossUp = ta.crossover(close, aVwap)    // trend reclaimed
+float r2Score = close > aVwap ? 1.0 : close < aVwap ? -1.0 : 0.0
+
+// R3 - previous session VWAP close as a magnet/target.
+// "Visit then react": the previous bar was inside the touch zone, the current bar crosses the wall.
+bool xUp = ta.crossover(close, prevVwapClose)
+bool xDn = ta.crossunder(close, prevVwapClose)
+bool nearWall = not na(prevVwapClose) and math.abs(close[1] - prevVwapClose) <= prevVwapClose * touchPct / 100
+bool r3BuyEvt  = usePrev and not newSession and nearWall and xUp
+bool r3SellEvt = usePrev and not newSession and nearWall and xDn
+
+var float r3Score = 0.0
+var int   r3Age   = 9999
+if r3BuyEvt
+    r3Score := 1.0
+    r3Age   := 0
+else if r3SellEvt
+    r3Score := -1.0
+    r3Age   := 0
+else
+    r3Age += 1
+    if r3Age > holdBars
+        r3Score := 0.0
+
+// R4 - big players drifting away from the crowd.
+bool dUp = not na(divg) and divg >=  divThr / 100
+bool dDn = not na(divg) and divg <= -divThr / 100
+bool r4BuyEvt  = dUp and not dUp[1]
+bool r4SellEvt = dDn and not dDn[1]
+float r4Score = dUp ? 1.0 : dDn ? -1.0 : 0.0
+
+// ------------------------- Composite verdict --------------------------------
+float score = 0.25 * r1Score + 0.30 * r2Score + 0.20 * r3Score + 0.25 * r4Score
+bool  buySig  = score >=  0.35 and score[1] <  0.35
+bool  sellSig = score <= -0.35 and score[1] > -0.35
+
+// ------------------------- Plots --------------------------------------------
+color C_VWAP  = #F0B90B
+color C_ANCH  = #1EAEDB
+color C_TSIZE = #FFD000
+color C_PREV  = #848E9C
+color C_GOOD  = #0ECB81
+color C_BAD   = #F6465D
+
+pUp2 = plot(up2, "VWAP +2s", color=color.new(C_PREV, 55), style=plot.style_linebr)
+pLo2 = plot(lo2, "VWAP -2s", color=color.new(C_PREV, 55), style=plot.style_linebr)
+fill(pUp2, pLo2, color=color.new(C_PREV, 94), title="VWAP band fill")
+plot(up1, "VWAP +1s", color=color.new(C_PREV, 75), style=plot.style_linebr)
+plot(lo1, "VWAP -1s", color=color.new(C_PREV, 75), style=plot.style_linebr)
+plot(sesVwap, "Session VWAP", color=C_VWAP, linewidth=2)
+plot(aVwap, "Anchored VWAP", color=C_ANCH, linewidth=2)
+plot(tVwap, "T-Size VWAP", color=color.new(C_TSIZE, 0), linewidth=1, style=plot.style_steplinebr)
+plot(usePrev ? prevVwapClose : na, "Prev session VWAP close", color=color.new(C_PREV, 20), style=plot.style_steplinebr)
+
+plotshape(buySig,  "Composite BUY",  style=shape.triangleup,   location=location.belowbar, color=C_GOOD, size=size.tiny, text="BUY",  textcolor=C_GOOD)
+plotshape(sellSig, "Composite SELL", style=shape.triangledown, location=location.abovebar, color=C_BAD,  size=size.tiny, text="SELL", textcolor=C_BAD)
+bgcolor(score >= 0.35 ? color.new(C_GOOD, 92) : score <= -0.35 ? color.new(C_BAD, 92) : na, title="Verdict background")
+
+// Event labels (confirmed bars only, to cut intrabar repaint noise)
+if barstate.isconfirmed
+    if r1BuyEvt
+        label.new(bar_index, na, "R1 snap-back", yloc=yloc.belowbar, style=label.style_label_up, color=color.new(C_GOOD, 25), textcolor=color.white, size=size.tiny)
+    if r1SellEvt
+        label.new(bar_index, na, "R1 fade", yloc=yloc.abovebar, style=label.style_label_down, color=color.new(C_BAD, 25), textcolor=color.white, size=size.tiny)
+    if r2CrossDn
+        label.new(bar_index, na, "R2 lost aVWAP", yloc=yloc.abovebar, style=label.style_label_down, color=color.new(C_BAD, 55), textcolor=color.white, size=size.tiny)
+    if r2CrossUp
+        label.new(bar_index, na, "R2 back above aVWAP", yloc=yloc.belowbar, style=label.style_label_up, color=color.new(C_GOOD, 55), textcolor=color.white, size=size.tiny)
+    if r3BuyEvt
+        label.new(bar_index, na, "R3 wall reclaimed", yloc=yloc.belowbar, style=label.style_label_up, color=color.new(C_GOOD, 40), textcolor=color.white, size=size.tiny)
+    if r3SellEvt
+        label.new(bar_index, na, "R3 wall rejected", yloc=yloc.abovebar, style=label.style_label_down, color=color.new(C_BAD, 40), textcolor=color.white, size=size.tiny)
+    if r4BuyEvt
+        label.new(bar_index, na, "R4 smart money up", yloc=yloc.belowbar, style=label.style_label_up, color=color.new(C_TSIZE, 35), textcolor=color.black, size=size.tiny)
+    if r4SellEvt
+        label.new(bar_index, na, "R4 smart money out", yloc=yloc.abovebar, style=label.style_label_down, color=color.new(C_BAD, 55), textcolor=color.white, size=size.tiny)
+
+// ------------------------- Dashboard table ----------------------------------
+var table dash = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black, 20), border_width=1, border_color=color.new(color.gray, 60))
+
+f_state(float s, bool ext) =>
+    ext ? "EXTENDED" : s > 0 ? "BULLISH" : s < 0 ? "BEARISH" : "NEUTRAL"
+
+f_col(float s) => s > 0 ? C_GOOD : s < 0 ? C_BAD : C_PREV
+
+if showTable and barstate.islast
+    table.cell(dash, 0, 0, "RULE", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 0, "STATE", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 0, 1, "1 Time VWAP", text_color=color.silver, text_size=size.tiny)
+    table.cell(dash, 1, 1, f_state(r1Score, r1Ext and r1Score == 0), text_color=f_col(r1Score), text_size=size.tiny)
+    table.cell(dash, 0, 2, "2 Anchored", text_color=color.silver, text_size=size.tiny)
+    table.cell(dash, 1, 2, f_state(r2Score, false), text_color=f_col(r2Score), text_size=size.tiny)
+    table.cell(dash, 0, 3, "3 Prev close", text_color=color.silver, text_size=size.tiny)
+    table.cell(dash, 1, 3, f_state(r3Score, false), text_color=f_col(r3Score), text_size=size.tiny)
+    table.cell(dash, 0, 4, "4 T-Size", text_color=color.silver, text_size=size.tiny)
+    table.cell(dash, 1, 4, na(tVwap) ? "N/A (no volume)" : f_state(r4Score, false), text_color=na(tVwap) ? color.gray : f_col(r4Score), text_size=size.tiny)
+    table.cell(dash, 0, 5, "VERDICT", text_color=color.white, text_size=size.small, bgcolor=color.new(color.gray, 70))
+    table.cell(dash, 1, 5, (score >= 0.35 ? "BUY " : score <= -0.35 ? "SELL " : "WAIT ") + str.tostring(math.round(math.abs(score) * 100)) + "%", text_color=score >= 0.35 ? C_GOOD : score <= -0.35 ? C_BAD : color.silver, text_size=size.small)
+
+// ------------------------- Alerts -------------------------------------------
+alertcondition(buySig,   "VWAP-PREC Composite BUY",  "VWAP Precision: composite BUY (score >= +0.35)")
+alertcondition(sellSig,  "VWAP-PREC Composite SELL", "VWAP Precision: composite SELL (score <= -0.35)")
+alertcondition(r1BuyEvt, "R1 Snap-back BUY",         "VWAP Precision R1: price snapped back inside the lower band - reversion BUY setup")
+alertcondition(r1SellEvt,"R1 Fade SELL",             "VWAP Precision R1: price snapped back inside the upper band - reversion SELL setup")
+alertcondition(r2CrossDn,"R2 Lost Anchored VWAP",    "VWAP Precision R2: price closed below the anchored VWAP - trend may be losing steam")
+alertcondition(r2CrossUp,"R2 Reclaimed Anchored VWAP","VWAP Precision R2: price back above the anchored VWAP")
+alertcondition(r3BuyEvt, "R3 Wall Reclaimed",        "VWAP Precision R3: previous VWAP close touched and reclaimed from below")
+alertcondition(r3SellEvt,"R3 Wall Rejected",         "VWAP Precision R3: previous VWAP close touched and rejected from above")
+alertcondition(r4BuyEvt, "R4 Smart Money Accumulating","VWAP Precision R4: big-player VWAP above crowd VWAP by threshold")
+alertcondition(r4SellEvt,"R4 Smart Money Distributing","VWAP Precision R4: big-player VWAP below crowd VWAP by threshold")

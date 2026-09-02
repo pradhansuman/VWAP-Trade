@@ -1,0 +1,738 @@
+/* ============================================================================
+ * VWAP Precision Signals — app layer (DOM, data, charts)
+ * ==========================================================================*/
+(function () {
+  'use strict';
+  var E = window.VWAPEngine;
+
+  /* ---------------- helpers ---------------- */
+  function $(s, p) { return (p || document).querySelector(s); }
+  function $$(s, p) { return Array.prototype.slice.call((p || document).querySelectorAll(s)); }
+  function fmt(x, dp) {
+    if (x === null || x === undefined || !isFinite(x)) return '—';
+    return Number(x).toLocaleString(undefined, { minimumFractionDigits: dp, maximumFractionDigits: dp });
+  }
+  function fmtPrice(asset, x) { return fmt(x, asset.dp); }
+  function timeStr(t, tz) {
+    return new Intl.DateTimeFormat('en-GB', { timeZone: tz, hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short' }).format(new Date(t));
+  }
+  function hhmm(t, tz) {
+    return new Intl.DateTimeFormat('en-GB', { timeZone: tz, hour: '2-digit', minute: '2-digit' }).format(new Date(t));
+  }
+  function el(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined) e.textContent = text;
+    return e;
+  }
+
+  /* ---------------- asset config ---------------- */
+  var ASSETS = {
+    nifty: {
+      key: 'nifty', name: 'Nifty 50', code: '^NSEI', tz: 'Asia/Kolkata', dp: 2,
+      refreshSec: 300, legend: 'NSE · 15-minute bars', unit: 'pts'
+    },
+    btc: {
+      key: 'btc', name: 'Bitcoin', code: 'BTCUSDT', tz: 'UTC', dp: 2,
+      refreshSec: 60, legend: 'Binance · 5-minute bars', unit: 'USDT'
+    }
+  };
+  var KEYS = ['nifty', 'btc'];
+
+  /* ---------------- state ---------------- */
+  var state = {
+    mode: 'live',
+    data: {},          // key -> { candles, source, fetchedAt, stale }
+    countdown: {},     // key -> seconds left
+    result: {},        // key -> engine result
+    hidden: {},        // key -> {seriesName:bool}
+    demoSeed: { nifty: 20260902, btc: 21 },
+    timers: { demo: null, tick: null }
+  };
+
+  /* ---------------- theme ---------------- */
+  function safeLS(fn) { try { return fn(); } catch (e) { return null; } }
+  function setTheme(t) {
+    document.documentElement.setAttribute('data-theme', t);
+    safeLS(function () { localStorage.setItem('vwap-theme', t); });
+    $$('#themeSeg button').forEach(function (b) {
+      var on = b.dataset.theme === t;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+    redrawAll();
+  }
+
+  /* ================= DATA LAYER ================= */
+
+  function fetchJSON(url, timeoutMs) {
+    var ctl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    var timer = setTimeout(function () { if (ctl) ctl.abort(); }, timeoutMs || 12000);
+    return fetch(url, ctl ? { signal: ctl.signal } : {})
+      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .finally(function () { clearTimeout(timer); });
+  }
+
+  function fetchBTC() {
+    var hosts = ['https://api.binance.com', 'https://api1.binance.com', 'https://data-api.binance.vision'];
+    var path = '/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=1000';
+    var i = 0;
+    function tryNext() {
+      if (i >= hosts.length) return Promise.reject(new Error('All Binance endpoints unreachable'));
+      var host = hosts[i++];
+      return fetchJSON(host + path, 10000).then(function (rows) {
+        if (!Array.isArray(rows) || rows.length < 50) throw new Error('Unexpected payload');
+        var candles = rows.map(function (r) {
+          return { t: r[0], o: +r[1], h: +r[2], l: +r[3], c: +r[4], v: +r[5] };
+        }).filter(function (c) { return isFinite(c.c) && isFinite(c.h) && isFinite(c.l); });
+        return { candles: candles, source: 'Binance · BTCUSDT · 5m' };
+      }).catch(function (err) {
+        if (i >= hosts.length) throw err;
+        return tryNext();
+      });
+    }
+    return tryNext();
+  }
+
+  function fetchNifty() {
+    var t1 = 'https://query1.finance.yahoo.com/v8/finance/chart/%5ENSEI?interval=15m&range=5d';
+    var t2 = 'https://query2.finance.yahoo.com/v8/finance/chart/%5ENSEI?interval=15m&range=5d';
+    var attempts = [
+      { name: 'Yahoo (via relay)', url: 'https://api.allorigins.win/raw?url=' + encodeURIComponent(t1), wrap: false },
+      { name: 'Yahoo (via relay)', url: 'https://corsproxy.io/?url=' + encodeURIComponent(t1), wrap: false },
+      { name: 'Yahoo (via relay)', url: 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(t1), wrap: false },
+      { name: 'Yahoo (via relay)', url: 'https://api.allorigins.win/get?url=' + encodeURIComponent(t2), wrap: true }
+    ];
+    var i = 0;
+    function tryNext() {
+      if (i >= attempts.length) return Promise.reject(new Error('Nifty feed unreachable — Yahoo and its public relays all failed. Use Demo, or retry in a minute.'));
+      var a = attempts[i++];
+      return fetchJSON(a.url, 12000).then(function (json) {
+        if (a.wrap && json && json.contents) json = JSON.parse(json.contents);
+        var res = json && json.chart && json.chart.result && json.chart.result[0];
+        if (!res || !res.timestamp || !res.timestamp.length) throw new Error('Unexpected payload');
+        var q = res.indicators.quote[0];
+        var candles = [];
+        for (var k = 0; k < res.timestamp.length; k++) {
+          var c = q.close[k], h = q.high[k], l = q.low[k], o = q.open[k], v = q.volume ? q.volume[k] : 0;
+          if ([c, h, l, o].some(function (x) { return x === null || !isFinite(x); })) continue;
+          candles.push({ t: res.timestamp[k] * 1000, o: o, h: h, l: l, c: c, v: (v || 0) });
+        }
+        if (candles.length < 50) throw new Error('Too few bars returned');
+        return { candles: candles, source: a.name + ' · NSEI · 15m' };
+      }).catch(function (err) {
+        if (i >= attempts.length) throw err;
+        return tryNext();
+      });
+    }
+    return tryNext();
+  }
+
+  /* ---------------- demo generator ---------------- */
+  function mulberry32(seed) {
+    return function () {
+      seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+      var t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  function demoCandles(key) {
+    var a = ASSETS[key];
+    var rnd = mulberry32(state.demoSeed[key]);
+    var isBtc = key === 'btc';
+    var step = isBtc ? 5 * 60000 : 15 * 60000;
+    var n = isBtc ? 900 : 480;
+    var px = isBtc ? 68000 : 24800;
+    var vol = isBtc ? 0.0021 : 0.0013;
+    var out = [], drift = 0, regime = 0;
+    var t0 = Date.now() - n * step;
+    for (var i = 0; i < n; i++) {
+      if (rnd() < 0.02) regime = (rnd() - 0.5) * (isBtc ? 4 : 2.5);
+      drift = drift * 0.97 + regime * vol * 0.35;
+      var o = px;
+      var shock = (rnd() + rnd() + rnd() - 1.5) * vol;
+      var c = o * (1 + drift + shock);
+      var wick = Math.abs(shock) * o * (0.6 + rnd());
+      var h = Math.max(o, c) + wick * rnd();
+      var l = Math.min(o, c) - wick * rnd();
+      var baseV = isBtc ? 120 : 90000;
+      var v = baseV * (0.4 + rnd() * 1.2);
+      if (rnd() < 0.045) v *= (isBtc ? 4.5 : 3.8) * (0.7 + rnd()); // big-player bursts
+      out.push({ t: t0 + i * step, o: o, h: h, l: l, c: c, v: v });
+      px = c;
+    }
+    return { candles: out, source: 'Demo · synthetic ' + a.code };
+  }
+
+  function stepDemo() {
+    KEYS.forEach(function (key) {
+      var d = state.data[key];
+      if (!d || !d.demo) return;
+      var cs = d.candles;
+      var step = key === 'btc' ? 5 * 60000 : 15 * 60000;
+      var last = cs[cs.length - 1];
+      var vol = key === 'btc' ? 0.0011 : 0.0007;
+      var c = last.c * (1 + (Math.random() - 0.5) * vol * 2);
+      var h = Math.max(last.o, c) * (1 + Math.random() * vol);
+      var l = Math.min(last.o, c) * (1 - Math.random() * vol);
+      var nb = { t: last.t + step, o: last.c, h: h, l: l, c: c, v: last.v * (0.5 + Math.random()) };
+      if (Math.random() < 0.06) nb.v *= 4;
+      cs.push(nb);
+      if (cs.length > 1100) cs.shift();
+      renderAsset(key);
+    });
+  }
+
+  /* ================= ANALYSIS ================= */
+  function analyze(key) {
+    var d = state.data[key];
+    if (!d) return null;
+    window.__LAST_BAR_FORMING__ = true;
+    return E.analyze(d.candles, {});
+  }
+
+  /* ================= RENDERING ================= */
+
+  function setState(key, kind, payload) {
+    var box = $('#state-' + key);
+    var body = $('#panel-' + key);
+    body.classList.remove('is-loading', 'has-error');
+    if (kind === 'loading') {
+      body.classList.add('is-loading');
+      box.innerHTML = '';
+      box.appendChild(el('div', 'skel-block'));
+      box.appendChild(el('div', 'load-note', 'Loading ' + ASSETS[key].name + ' data…'));
+      box.hidden = false;
+      setTimeout(function () {
+        var note = $('.load-note', box);
+        if (note && state.data[key] === undefined) note.textContent = 'Still trying — the free feed can be slow. You can switch to Demo below.';
+      }, 15000);
+    } else if (kind === 'error') {
+      body.classList.add('has-error');
+      box.innerHTML = '';
+      var card = el('div', 'error-card');
+      card.setAttribute('role', 'alert');
+      card.appendChild(el('div', 'error-title', 'Feed unavailable'));
+      card.appendChild(el('p', 'error-cause', payload && payload.message ? String(payload.message) : 'Network error.'));
+      var actions = el('div', 'error-actions');
+      var retry = el('button', 'btn btn-outline', 'Retry');
+      retry.type = 'button';
+      retry.addEventListener('click', function () { loadAsset(key, true); });
+      var demoBtn = el('button', 'btn btn-ghost', 'Load demo data');
+      demoBtn.type = 'button';
+      demoBtn.addEventListener('click', function () { startDemo(); });
+      actions.appendChild(retry); actions.appendChild(demoBtn);
+      card.appendChild(actions);
+      box.appendChild(card);
+      box.hidden = false;
+    } else {
+      box.hidden = true;
+      box.innerHTML = '';
+    }
+  }
+
+  function sessionChange(candles, sessionOf) {
+    var last = sessionOf[sessionOf.length - 1];
+    for (var i = sessionOf.length - 1; i >= 0; i--) {
+      if (sessionOf[i] !== last) return candles[i + 1].o;
+    }
+    return candles[0].o;
+  }
+
+  function ruleStateChip(r) {
+    var map = { bullish: ['BULLISH', 'chip-bull'], bearish: ['BEARISH', 'chip-bear'], extended: ['EXTENDED', 'chip-warn'], neutral: ['NEUTRAL', 'chip-flat'], na: ['N/A', 'chip-flat'] };
+    var m = map[r.state] || map.neutral;
+    return '<span class="chip ' + m[1] + '">' + m[0] + '</span>';
+  }
+
+  function renderAsset(key) {
+    var a = ASSETS[key];
+    var d = state.data[key];
+    var res = state.result[key] = analyze(key);
+    if (!d || !res || res.empty) return;
+    setState(key, 'ok');   // data arrived — clear loading/error state
+
+    var root = $('#panel-' + key);
+    var live = d.candles[d.candles.length - 1];
+
+    // price header
+    $('#price-' + key).textContent = fmtPrice(a, live.c);
+    var dayRef = sessionChange(d.candles, res.sessionOf);
+    var chg = (live.c - dayRef) / dayRef * 100;
+    var chgEl = $('#chg-' + key);
+    chgEl.textContent = (chg >= 0 ? '+' : '') + chg.toFixed(2) + '% session';
+    chgEl.className = 'delta ' + (chg >= 0 ? 'up' : 'down');
+
+    // verdict
+    var badge = $('#badge-' + key);
+    badge.textContent = res.verdict;
+    badge.className = 'signal-badge ' + (res.verdict === 'BUY' ? 'sig-buy' : res.verdict === 'SELL' ? 'sig-sell' : 'sig-wait');
+    $('#confv-' + key).textContent = res.confidence + '%';
+    $('#confbar-' + key).style.width = Math.max(4, res.confidence) + '%';
+    $('#score-' + key).textContent = (res.score >= 0 ? '+' : '') + res.score.toFixed(2);
+
+    // rule cards
+    var wrap = $('#rules-' + key);
+    wrap.innerHTML = '';
+    res.rules.forEach(function (r) {
+      var card = el('div', 'rule-card rule-' + r.state);
+      var head = el('div', 'rule-head');
+      head.appendChild(el('span', 'rule-id', r.id));
+      head.appendChild(el('span', 'rule-name', r.name));
+      head.insertAdjacentHTML('beforeend', ruleStateChip(r));
+      card.appendChild(head);
+      card.appendChild(el('p', 'rule-reading', r.reading));
+      var meta = el('div', 'rule-meta');
+      var bits = [];
+      if (r.id === 'R1') bits.push('VWAP ' + fmtPrice(a, r.vwap), 'z ' + (isFinite(r.z) ? r.z.toFixed(2) : '—'));
+      if (r.id === 'R2') bits.push('Anchor VWAP ' + fmtPrice(a, r.vwap));
+      if (r.id === 'R3') bits.push('Level ' + fmtPrice(a, r.level));
+      if (r.id === 'R4') bits.push(r.div != null && isFinite(r.div) ? 'Δ ' + r.div.toFixed(2) + '% vs crowd' : 'no big-bar data');
+      meta.textContent = bits.join(' · ');
+      card.appendChild(meta);
+      wrap.appendChild(card);
+    });
+
+    // trade plan strip
+    var plan = $('#plan-' + key);
+    plan.innerHTML = '';
+    var cells;
+    if (res.idea) {
+      cells = [
+        ['Signal', res.idea.side, res.idea.side === 'BUY' ? 'up' : 'down'],
+        ['Entry', fmtPrice(a, res.idea.entry), ''],
+        ['Stop', fmtPrice(a, res.idea.stop), 'down'],
+        ['Target', fmtPrice(a, res.idea.target), 'up'],
+        ['Reward:Risk', res.idea.rr.toFixed(2) + ' : 1', '']
+      ];
+    } else {
+      cells = [['Signal', 'WAIT', ''], ['Entry', '—', ''], ['Stop', '—', ''], ['Target', '—', ''], ['Reward:Risk', '—', '']];
+    }
+    cells.forEach(function (c) {
+      var cell = el('div', 'plan-cell');
+      cell.appendChild(el('span', 'k', c[0]));
+      var v = el('span', 'v ' + c[2], c[1]);
+      cell.appendChild(v);
+      plan.appendChild(cell);
+    });
+
+    // meta line
+    var lastEvent = res.events.length ? res.events[res.events.length - 1] : null;
+    var ago = lastEvent ? Math.max(0, res.evalIdx - lastEvent.i) : null;
+    $('#meta-' + key).innerHTML = '';
+    var src = el('span', '', d.source + (d.stale ? ' · update failed — data from ' + timeStr(d.fetchedAt, a.tz) : ''));
+    $('#meta-' + key).appendChild(src);
+    if (lastEvent) {
+      $('#meta-' + key).appendChild(el('span', 'meta-dot', '·'));
+      $('#meta-' + key).appendChild(el('span', '', 'last trigger: ' + lastEvent.label + ' (' + ago + ' bars ago)'));
+    }
+
+    drawChart(key);
+  }
+
+  /* ================= CHART ================= */
+
+  var SERIES = [
+    { id: 'price', label: 'Price', color: 'var(--ink)' },
+    { id: 'vwap', label: 'Session VWAP', color: '#F0B90B' },
+    { id: 'band', label: '±2σ band', color: 'rgba(132,142,156,.55)' },
+    { id: 'avwap', label: 'Anchored VWAP', color: '#1EAEDB' },
+    { id: 'tsize', label: 'T-Size VWAP', color: '#FFD000' },
+    { id: 'prev', label: 'Prev VWAP close', color: '#848E9C' }
+  ];
+
+  function cssVar(name) {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  }
+
+  function drawChart(key, canvasOverride, barCount) {
+    var a = ASSETS[key];
+    var d = state.data[key], res = state.result[key];
+    if (!d || !res || res.empty) return;
+    var canvas = canvasOverride || $('#chart-' + key);
+    if (!canvas) return;
+    var ctx = canvas.getContext('2d');
+    var dpr = window.devicePixelRatio || 1;
+    var rect = canvas.getBoundingClientRect();
+    var W = Math.max(320, rect.width), H = Math.max(180, rect.height);
+    canvas.width = W * dpr; canvas.height = H * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    var show = state.hidden[key] || {};
+    var n = d.candles.length;
+    var count = Math.min(barCount || Math.max(60, Math.min(170, Math.floor(W / 7))), n);
+    var from = n - count;
+    var s = res.series;
+
+    var min = Infinity, max = -Infinity;
+    for (var i = from; i < n; i++) {
+      [d.candles[i].l, d.candles[i].h, s.vwap[i], s.up2[i], s.lo2[i]].forEach(function (v) {
+        if (isFinite(v)) { if (v < min) min = v; if (v > max) max = v; }
+      });
+      if (!show.avwap && isFinite(s.aVwap[i])) { if (s.aVwap[i] < min) min = s.aVwap[i]; if (s.aVwap[i] > max) max = s.aVwap[i]; }
+      if (!show.prev && isFinite(s.prevClose[i])) { if (s.prevClose[i] < min) min = s.prevClose[i]; if (s.prevClose[i] > max) max = s.prevClose[i]; }
+      if (!show.tsize && isFinite(s.bigVwap[i])) { if (s.bigVwap[i] < min) min = s.bigVwap[i]; if (s.bigVwap[i] > max) max = s.bigVwap[i]; }
+    }
+    var pad = (max - min) * 0.06 || 1;
+    min -= pad; max += pad;
+
+    var padL = 6, padR = 62, padT = 8, padB = 22;
+    var iw = W - padL - padR, ih = H - padT - padB;
+    function X(i) { return padL + (i - from) / (count - 1) * iw; }
+    function Y(v) { return padT + (1 - (v - min) / (max - min)) * ih; }
+
+    var ink = cssVar('--ink') || '#EAECEF';
+    var grid = cssVar('--chart-grid') || 'rgba(132,142,156,.18)';
+    var muted = cssVar('--ink-muted') || '#848E9C';
+
+    ctx.clearRect(0, 0, W, H);
+    ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
+
+    // grid + y labels
+    var rows = 4;
+    for (var g = 0; g <= rows; g++) {
+      var gy = padT + ih * g / rows;
+      var gv = max - (max - min) * g / rows;
+      ctx.strokeStyle = grid; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(padL, gy); ctx.lineTo(padL + iw, gy); ctx.stroke();
+      ctx.fillStyle = muted; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillText(fmt(gv, a.dp), padL + iw + 6, gy);
+    }
+    // x labels
+    ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+    var xt = 5;
+    for (var t = 0; t <= xt; t++) {
+      var xi = from + Math.round((count - 1) * t / xt);
+      ctx.fillText(hhmm(d.candles[xi].t, a.tz), X(xi), H - 6);
+    }
+
+    // band fill
+    if (!show.band) {
+      ctx.beginPath();
+      for (i = from; i < n; i++) { var x = X(i), y = Y(s.up2[i]); i === from ? ctx.moveTo(x, y) : ctx.lineTo(x, y); }
+      for (i = n - 1; i >= from; i--) { ctx.lineTo(X(i), Y(s.lo2[i])); }
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(132,142,156,.08)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(132,142,156,.4)';
+      ctx.setLineDash([3, 4]); ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (i = from; i < n; i++) { var x2 = X(i), y2 = Y(s.up2[i]); i === from ? ctx.moveTo(x2, y2) : ctx.lineTo(x2, y2); }
+      ctx.stroke();
+      ctx.beginPath();
+      for (i = from; i < n; i++) { var x3 = X(i), y3 = Y(s.lo2[i]); i === from ? ctx.moveTo(x3, y3) : ctx.lineTo(x3, y3); }
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    function line(arr, color, width, dash) {
+      ctx.strokeStyle = color; ctx.lineWidth = width;
+      ctx.setLineDash(dash || []);
+      ctx.beginPath();
+      var started = false;
+      for (i = from; i < n; i++) {
+        var v = arr[i];
+        if (!isFinite(v)) { started = false; continue; }
+        var x = X(i), y = Y(v);
+        if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    if (!show.prev) line(s.prevClose, muted, 1, [2, 3]);
+    if (!show.avwap) line(s.aVwap, '#1EAEDB', 1.6);
+    if (!show.tsize && res.hasVolume) line(s.bigVwap, '#FFD000', 1.4, [5, 3]);
+    if (!show.vwap) line(s.vwap, '#F0B90B', 2);
+    if (!show.price) {
+      ctx.strokeStyle = ink; ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      for (i = from; i < n; i++) { var x4 = X(i), y4 = Y(d.candles[i].c); i === from ? ctx.moveTo(x4, y4) : ctx.lineTo(x4, y4); }
+      ctx.stroke();
+      // last price chip
+      var lastV = d.candles[n - 1].c;
+      var ly = Math.min(Math.max(Y(lastV), padT + 8), padT + ih - 8);
+      ctx.fillStyle = lastV >= d.candles[from].c ? '#0ECB81' : '#F6465D';
+      ctx.fillRect(padL + iw + 2, ly - 8, padR - 6, 16);
+      ctx.fillStyle = '#0B0E11';
+      ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillText(fmt(lastV, a.dp), padL + iw + 6, ly);
+    }
+
+    canvas.__chart = { key: key, from: from, count: count, padL: padL, padR: padR, padT: padT, padB: padB, iw: iw, ih: ih, min: min, max: max, W: W, H: H, big: !!barCount };
+  }
+
+  function bindCrosshair(canvas, tipEl) {
+    canvas.addEventListener('mousemove', function (ev) {
+      var cfg = canvas.__chart;
+      if (!cfg) return;
+      var rect = canvas.getBoundingClientRect();
+      var mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
+      var idx = cfg.from + Math.round((mx - cfg.padL) / cfg.iw * (cfg.count - 1));
+      var d = state.data[cfg.key];
+      if (!d || idx < 0 || idx >= d.candles.length) { tipEl.hidden = true; return; }
+      var a = ASSETS[cfg.key], res = state.result[cfg.key], s = res.series;
+      var c = d.candles[idx];
+      tipEl.hidden = false;
+      tipEl.innerHTML =
+        '<b>' + timeStr(c.t, a.tz) + '</b><br>' +
+        'O ' + fmt(c.o, a.dp) + ' · H ' + fmt(c.h, a.dp) + '<br>' +
+        'L ' + fmt(c.l, a.dp) + ' · C ' + fmt(c.c, a.dp) + '<br>' +
+        'VWAP ' + fmt(s.vwap[idx], a.dp) + ' (z ' + s.z[idx].toFixed(2) + ')<br>' +
+        'Anch ' + (isFinite(s.aVwap[idx]) ? fmt(s.aVwap[idx], a.dp) : '—') +
+        ' · T-Size ' + (isFinite(s.bigVwap[idx]) ? fmt(s.bigVwap[idx], a.dp) : '—');
+      var tx = Math.min(mx + 14, cfg.W - 190);
+      var ty = Math.min(my + 12, cfg.H - 92);
+      tipEl.style.left = tx + 'px';
+      tipEl.style.top = ty + 'px';
+    });
+    canvas.addEventListener('mouseleave', function () { tipEl.hidden = true; });
+  }
+
+  /* ---------------- focus modal ---------------- */
+  var modal = null, lastFocus = null;
+  function openFocus(key) {
+    var a = ASSETS[key];
+    lastFocus = document.activeElement;
+    var ov = $('#focusModal');
+    ov.hidden = false;
+    $('#focusTitle').textContent = a.name + ' — ' + a.code;
+    var cv = $('#focusCanvas');
+    var tip = $('#focusTip');
+    cv.style.width = '100%';
+    cv.style.height = '62vh';
+    drawChart(key, cv, 420);
+    bindOnce(cv, tip);
+    modal = key;
+    $('#focusClose').focus();
+  }
+  function closeFocus() {
+    if (!modal) return;
+    $('#focusModal').hidden = true;
+    modal = null;
+    if (lastFocus && lastFocus.focus) lastFocus.focus();
+  }
+  var bound = new WeakSet();
+  function bindOnce(cv, tip) {
+    if (bound.has(cv)) return;
+    bound.add(cv);
+    bindCrosshair(cv, tip);
+    var rz;
+    window.addEventListener('resize', function () {
+      if (modal && cv && !$('#focusModal').hidden) {
+        clearTimeout(rz);
+        rz = setTimeout(function () { drawChart(modal, cv, 420); }, 120);
+      }
+    });
+  }
+
+  /* ================= DATA FLOW ================= */
+
+  function loadAsset(key, manual) {
+    var a = ASSETS[key];
+    setState(key, 'loading');
+    var fetcher = key === 'btc' ? fetchBTC() : fetchNifty();
+    return fetcher.then(function (r) {
+      state.data[key] = { candles: r.candles, source: r.source, fetchedAt: Date.now(), stale: false, demo: false };
+      state.countdown[key] = a.refreshSec;
+      renderAsset(key);
+      if (manual) flashStatus(a.name + ' updated');
+    }).catch(function (err) {
+      if (state.data[key] && state.data[key].candles) {
+        state.data[key].stale = true;
+        state.countdown[key] = ASSETS[key].refreshSec * 2;
+        renderAsset(key);
+        flashStatus(a.name + ' update failed — retrying with backoff');
+      } else {
+        setState(key, 'error', { message: err && err.message ? err.message : 'Network unreachable — the browser could not reach the data feed.' });
+      }
+    });
+  }
+
+  function loadAll(manual) {
+    KEYS.forEach(function (k) { loadAsset(k, manual); });
+  }
+
+  function startDemo() {
+    stopLiveTimers();
+    state.mode = 'demo';
+    syncModeUI();
+    KEYS.forEach(function (k) {
+      var r = demoCandles(k);
+      state.data[k] = { candles: r.candles, source: r.source + ' · DEMO', fetchedAt: Date.now(), stale: false, demo: true };
+      renderAsset(k);
+    });
+    state.timers.demo = setInterval(stepDemo, 4000);
+    flashStatus('Demo mode — synthetic data, animated. Switch back to LIVE anytime.');
+  }
+
+  function goLive() {
+    stopLiveTimers();
+    state.mode = 'live';
+    syncModeUI();
+    loadAll(false);
+  }
+
+  function stopLiveTimers() {
+    if (state.timers.demo) { clearInterval(state.timers.demo); state.timers.demo = null; }
+  }
+
+  function redrawAll() {
+    KEYS.forEach(function (k) { if (state.data[k]) drawChart(k); });
+  }
+
+  function syncModeUI() {
+    $$('#modeSeg button').forEach(function (b) {
+      var on = b.dataset.mode === state.mode;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+    $('#liveDot').className = 'dot ' + (state.mode === 'live' ? 'dot-live' : 'dot-demo');
+    $('#modeLabel').textContent = state.mode === 'live' ? 'LIVE FEEDS' : 'DEMO · SYNTHETIC';
+  }
+
+  var statusTimer = null;
+  function flashStatus(msg) {
+    var s = $('#statusMsg');
+    s.textContent = msg;
+    clearTimeout(statusTimer);
+    statusTimer = setTimeout(function () { s.textContent = defaultStatus(); }, 6000);
+  }
+  function defaultStatus() {
+    return state.mode === 'live' ? 'Live feeds on — BTC every 60s, Nifty every 5 min.' : 'Demo mode — animated synthetic bars.';
+  }
+
+  /* ================= INIT ================= */
+
+  function buildLegend(key) {
+    var wrap = $('#legend-' + key);
+    wrap.innerHTML = '';
+    SERIES.forEach(function (sr) {
+      if (sr.id === 'tsize' && key === 'nifty') { /* still shown; becomes N/A when no volume */ }
+      var b = el('button', 'lg' + (state.hidden[key] && state.hidden[key][sr.id] ? ' off' : ''));
+      b.type = 'button';
+      b.setAttribute('aria-pressed', state.hidden[key] && state.hidden[key][sr.id] ? 'false' : 'true');
+      b.style.setProperty('--lg-c', sr.color);
+      b.appendChild(el('span', 'lg-swatch'));
+      b.appendChild(document.createTextNode(sr.label));
+      b.addEventListener('click', function () {
+        state.hidden[key] = state.hidden[key] || {};
+        state.hidden[key][sr.id] = !state.hidden[key][sr.id];
+        b.classList.toggle('off', state.hidden[key][sr.id]);
+        b.setAttribute('aria-pressed', state.hidden[key][sr.id] ? 'false' : 'true');
+        drawChart(key);
+      });
+      wrap.appendChild(b);
+    });
+  }
+
+  function init() {
+    // theme
+    var saved = safeLS(function () { return localStorage.getItem('vwap-theme'); }) || 'dark';
+    setTheme(saved);
+    $$('#themeSeg button').forEach(function (b) {
+      b.addEventListener('click', function () { setTheme(b.dataset.theme); });
+    });
+
+    // mode
+    $$('#modeSeg button').forEach(function (b) {
+      b.addEventListener('click', function () { b.dataset.mode === 'live' ? goLive() : startDemo(); });
+    });
+    syncModeUI();
+
+    // refresh
+    $('#refreshBtn').addEventListener('click', function () {
+      if (state.mode === 'live') loadAll(true); else startDemo();
+    });
+
+    // focus modal
+    $('#focusClose').addEventListener('click', closeFocus);
+    $('#focusModal').addEventListener('click', function (e) { if (e.target === $('#focusModal')) closeFocus(); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeFocus(); });
+    KEYS.forEach(function (k) {
+      $('#expand-' + k).addEventListener('click', function () { openFocus(k); });
+    });
+
+    // crosshairs
+    KEYS.forEach(function (k) {
+      bindCrosshair($('#chart-' + k), $('#tip-' + k));
+    });
+
+    // legends + first paint
+    KEYS.forEach(function (k) { buildLegend(k); });
+
+    // clock
+    setInterval(function () {
+      var now = new Date();
+      $('#clockIST').textContent = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(now);
+      $('#clockUTC').textContent = new Intl.DateTimeFormat('en-GB', { timeZone: 'UTC', hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(now);
+    }, 1000);
+
+    // countdown / auto refresh
+    setInterval(function () {
+      if (state.mode !== 'live') return;
+      KEYS.forEach(function (k) {
+        if (!state.data[k] || state.data[k].demo) return;
+        state.countdown[k] = (state.countdown[k] || ASSETS[k].refreshSec) - 1;
+        var cdEl = $('#cd-' + k);
+        if (cdEl) cdEl.textContent = state.countdown[k] > 0 ? state.countdown[k] + 's' : 'now';
+        if (state.countdown[k] <= 0) loadAsset(k, false);
+      });
+    }, 1000);
+
+    // resize redraw
+    var rzT;
+    window.addEventListener('resize', function () {
+      clearTimeout(rzT);
+      rzT = setTimeout(function () { KEYS.forEach(function (k) { if (state.data[k]) drawChart(k); }); }, 150);
+    });
+
+    // pine copy / download
+    var pine = window.PINE_SOURCE || '';
+    $('#copyPine').addEventListener('click', function () {
+      function done(ok) {
+        var b = $('#copyPine');
+        b.textContent = ok ? 'Copied ✓' : 'Copy failed — select the code manually';
+        setTimeout(function () { b.textContent = 'Copy Pine Script'; }, 2500);
+      }
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(pine).then(function () { done(true); }, function () { done(false); });
+      } else { done(false); }
+    });
+    $('#dlPine').addEventListener('click', function () {
+      var blob = new Blob([pine], { type: 'text/plain' });
+      var url = URL.createObjectURL(blob);
+      var aEl = document.createElement('a');
+      aEl.href = url;
+      aEl.download = 'vwap-precision-signals.pine';
+      document.body.appendChild(aEl);
+      aEl.click();
+      aEl.remove();
+      setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
+    });
+
+    // anchor nav (native jump, no smooth-scroll scripting)
+    $$('.nav a').forEach(function (a) {
+      a.addEventListener('click', function () {
+        $$('.nav a').forEach(function (x) { x.classList.remove('active'); });
+        a.classList.add('active');
+      });
+    });
+
+    // pine code box (collapsed by default for performance)
+    $('#pineCode').textContent = pine;
+    $('#pineToggle').addEventListener('click', function () {
+      var box = $('#pineCodeWrap');
+      var openNow = !box.hidden;
+      box.hidden = openNow;
+      $('#pineToggle').setAttribute('aria-expanded', openNow ? 'false' : 'true');
+      $('#pineToggle').textContent = openNow ? 'Show the full Pine Script' : 'Hide the Pine Script';
+    });
+
+    // go
+    loadAll(false);
+  }
+
+  document.addEventListener('DOMContentLoaded', init);
+})();

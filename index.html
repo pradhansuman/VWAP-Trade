@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>VWAP Precision Signals — Nifty 50 &amp; Bitcoin Buy/Sell</title>
+  <meta name="description" content="Four-rule VWAP signal desk for Nifty 50 and Bitcoin: time-based VWAP snap-backs, anchored VWAP trend warnings, previous-day VWAP close targets, and T-Size big-player divergence — plus the matching Pine Script indicator." />
+  <!--
+    Discovery:
+      deliverable: single-page trading signal desk (web, responsive)
+      audience: the site owner + retail traders tracking Nifty 50 and BTC
+      direction: Dense / Professional on the binance design system (dark first)
+      sections: rail+topbar, two signal panels, four-rules explainer, scoring table, pine script, footer
+      accent: #F0B90B only (data colors green/red reserved for price semantics)
+    font-stack: BinancePlex fallback chain (per binance/DESIGN.md; proprietary font not bundled)
+  -->
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23222126'/%3E%3Cpath d='M6 20l6-8 5 5 9-11' stroke='%23F0B90B' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+</head>
+<body>
+<div class="shell">
+
+  <aside class="rail">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span class="brand-name">VWAP <em>Precision</em></span>
+    </div>
+    <nav aria-label="Sections">
+      <a href="#signals" class="active">Signals</a>
+      <a href="#rules">The four rules</a>
+      <a href="#scoring">How it's scored</a>
+      <a href="#pine">Pine Script</a>
+    </nav>
+    <div class="rail-foot">
+      <div class="clock-row"><span>NSE · IST</span><b id="clockIST">—</b></div>
+      <div class="clock-row"><span>Crypto · UTC</span><b id="clockUTC">—</b></div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="topbar">
+      <div class="status-left">
+        <span class="status-pill"><span class="dot dot-live" id="liveDot"></span><span id="modeLabel">LIVE FEEDS</span></span>
+        <span id="statusMsg" role="status" aria-live="polite">Live feeds on — BTC every 60s, Nifty every 5 min.</span>
+      </div>
+      <div class="controls">
+        <div class="seg" id="modeSeg" role="group" aria-label="Data mode">
+          <button type="button" data-mode="live" class="active" aria-pressed="true">Live</button>
+          <button type="button" data-mode="demo" aria-pressed="false">Demo</button>
+        </div>
+        <div class="seg" id="themeSeg" role="group" aria-label="Theme">
+          <button type="button" data-theme="dark" class="active" aria-pressed="true">Dark</button>
+          <button type="button" data-theme="light" aria-pressed="false">Light</button>
+        </div>
+        <button type="button" class="btn" id="refreshBtn">Refresh</button>
+      </div>
+    </div>
+
+    <header class="hero-head">
+      <h1>Buy or sell, <em>scored</em> by four VWAP rules.</h1>
+      <p>Live Nifty 50 and Bitcoin readings from four complementary VWAP signals — the daily scoreboard, the trend anchor, yesterday's closing wall, and where the big players are parked. Every verdict shows its math. Ideas, not advice.</p>
+    </header>
+
+    <section id="signals" aria-label="Live signals">
+      <div class="panels">
+
+        <!-- ================= NIFTY 50 ================= -->
+        <article class="panel" id="panel-nifty">
+          <div class="panel-head">
+            <div class="asset-id">
+              <div class="asset-code">NSEI · Index · 15m bars</div>
+              <h2 class="asset-name">Nifty 50</h2>
+              <div class="price-row">
+                <span class="price" id="price-nifty">—</span>
+                <span class="delta" id="chg-nifty">—</span>
+              </div>
+            </div>
+            <div class="verdict-box">
+              <span class="signal-badge sig-wait" id="badge-nifty" aria-live="polite">WAIT</span>
+              <div class="conf-row">
+                <span class="conf-bar"><i id="confbar-nifty"></i></span>
+                <span id="confv-nifty">—</span>
+              </div>
+              <div class="conf-row"><span>composite score</span><span class="score-chip" id="score-nifty">—</span></div>
+            </div>
+          </div>
+
+          <div id="state-nifty" aria-live="polite"></div>
+
+          <div class="rules" id="rules-nifty"></div>
+          <div class="plan" id="plan-nifty" aria-label="Trade plan"></div>
+
+          <div class="chart-shell">
+            <div class="chart-top">
+              <span class="chart-title">Price vs the four VWAP levels</span>
+              <div class="legend" id="legend-nifty"></div>
+            </div>
+            <div class="chart-holder">
+              <canvas class="chart" id="chart-nifty" role="img" aria-label="Nifty 50 line chart with session VWAP, two-sigma bands, anchored VWAP, T-Size VWAP and previous session VWAP close"></canvas>
+              <button type="button" class="expand-btn" id="expand-nifty" aria-label="Expand Nifty 50 chart">
+                <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M1 6V1h5M15 10v5h-5M10 1h5v5M6 15H1v-5"/></svg>
+              </button>
+              <div class="chart-tip" id="tip-nifty" hidden></div>
+            </div>
+          </div>
+
+          <div class="panel-meta">
+            <span id="meta-nifty"></span>
+            <span class="meta-dot" aria-hidden="true">·</span>
+            <span>next refresh <b id="cd-nifty">—</b></span>
+          </div>
+        </article>
+
+        <!-- ================= BITCOIN ================= -->
+        <article class="panel" id="panel-btc">
+          <div class="panel-head">
+            <div class="asset-id">
+              <div class="asset-code">BTCUSDT · Crypto · 5m bars</div>
+              <h2 class="asset-name">Bitcoin</h2>
+              <div class="price-row">
+                <span class="price" id="price-btc">—</span>
+                <span class="delta" id="chg-btc">—</span>
+              </div>
+            </div>
+            <div class="verdict-box">
+              <span class="signal-badge sig-wait" id="badge-btc" aria-live="polite">WAIT</span>
+              <div class="conf-row">
+                <span class="conf-bar"><i id="confbar-btc"></i></span>
+                <span id="confv-btc">—</span>
+              </div>
+              <div class="conf-row"><span>composite score</span><span class="score-chip" id="score-btc">—</span></div>
+            </div>
+          </div>
+
+          <div id="state-btc" aria-live="polite"></div>
+
+          <div class="rules" id="rules-btc"></div>
+          <div class="plan" id="plan-btc" aria-label="Trade plan"></div>
+
+          <div class="chart-shell">
+            <div class="chart-top">
+              <span class="chart-title">Price vs the four VWAP levels</span>
+              <div class="legend" id="legend-btc"></div>
+            </div>
+            <div class="chart-holder">
+              <canvas class="chart" id="chart-btc" role="img" aria-label="Bitcoin line chart with session VWAP, two-sigma bands, anchored VWAP, T-Size VWAP and previous session VWAP close"></canvas>
+              <button type="button" class="expand-btn" id="expand-btc" aria-label="Expand Bitcoin chart">
+                <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M1 6V1h5M15 10v5h-5M10 1h5v5M6 15H1v-5"/></svg>
+              </button>
+              <div class="chart-tip" id="tip-btc" hidden></div>
+            </div>
+          </div>
+
+          <div class="panel-meta">
+            <span id="meta-btc"></span>
+            <span class="meta-dot" aria-hidden="true">·</span>
+            <span>next refresh <b id="cd-btc">—</b></span>
+          </div>
+        </article>
+
+      </div>
+    </section>
+
+    <!-- ================= THE FOUR RULES ================= -->
+    <section class="block" id="rules">
+      <div class="block-head">
+        <p class="kicker">The playbook</p>
+        <h2>Four rules, four different questions.</h2>
+        <p>Each rule watches the market through a different VWAP lens. Individually each one is a tendency, not a law — the desk only calls a trade when several agree.</p>
+      </div>
+
+      <div class="rule-row">
+        <div class="rule-num">01</div>
+        <div class="what">
+          <h3>Time-Based VWAP — the daily scoreboard</h3>
+          <p>VWAP that resets every session (day here; week or month in the Pine inputs) — the volume-weighted average of everything traded so far. Bands at ±1σ and ±2σ measure how far price has wandered.</p>
+        </div>
+        <div class="why">
+          <p><b>The trade:</b> when price stretches beyond the 2σ band and then snaps back inside, that "coming back" move is the reversion signal — buy the snap-back under the lower band, fade the one above it. <b>The caveat you already know:</b> sometimes price runs away from VWAP for a real reason — news, flows, a genuine trend. The rule never chases; it waits for the return, and if the return never comes, no signal fires.</p>
+        </div>
+      </div>
+
+      <div class="rule-row">
+        <div class="rule-num">02</div>
+        <div class="what">
+          <h3>Anchored VWAP — the trend's fuel gauge</h3>
+          <p>Instead of resetting daily, the scoreboard starts at <i>your</i> moment: the swing low where the current trend began. The desk auto-anchors at confirmed swing lows; the Pine version also accepts a manual date.</p>
+        </div>
+        <div class="why">
+          <p><b>The trade:</b> while price holds above the anchored line, the trend has fuel. A close below it is the warning sign that the move may be running out of steam — a bearish regime flag that carries the heaviest weight on the desk.</p>
+        </div>
+      </div>
+
+      <div class="rule-row">
+        <div class="rule-num">03</div>
+        <div class="what">
+          <h3>VWAP Close — yesterday's wall</h3>
+          <p>The final VWAP value from the previous session, drawn as a level across today. Price "likes to visit" it — like a ball bouncing back to touch a wall it left.</p>
+        </div>
+        <div class="why">
+          <p><b>The trade:</b> treat the level as a target when you're positioned toward it. When price visits it, direction matters: touch-and-reclaim from below is bullish; touch-and-reject from above is bearish. A dead touch with no reaction is just a visit — no score.</p>
+        </div>
+      </div>
+
+      <div class="rule-row">
+        <div class="rule-num">04</div>
+        <div class="what">
+          <h3>T-Size VWAP — whales vs little fish</h3>
+          <p>The same VWAP idea, but only bars whose volume is at least 3× the recent average — the trades big players leave behind. Their average price is compared with the crowd's VWAP all session.</p>
+        </div>
+        <div class="why">
+          <p><b>The trade:</b> when the whales' average drifts ≥0.15% away from the crowd, that's an early clue before everyone else notices — whales above the crowd reads as quiet accumulation; whales below reads as distribution. <b>Needs real volume:</b> the NSE spot index publishes none, so this rule reads N/A there — check the NIFTY futures chart (or the Pine script on any volume-bearing symbol).</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= SCORING ================= -->
+    <section class="block" id="scoring">
+      <div class="block-head">
+        <p class="kicker">The verdict</p>
+        <h2>How BUY, SELL and WAIT are computed.</h2>
+        <p>Every rule votes between −1 and +1 on the latest closed bar. The weighted sum becomes the composite score; the badge flips only when the score crosses a threshold — no flickering signals on every tick.</p>
+      </div>
+
+      <div class="table-wrap">
+        <table class="score-tbl">
+          <thead>
+            <tr><th>Rule</th><th>Reads</th><th>Weight</th><th>Bullish when</th><th>Bearish when</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><b>R1</b> · Time-Based VWAP</td>
+              <td>Session VWAP ±2σ bands</td>
+              <td class="num">25%</td>
+              <td>Snap-back inside the lower band <span class="pos">+1</span> (holds 12 bars)</td>
+              <td>Fade back inside the upper band <span class="neg">−1</span> (holds 12 bars)</td>
+            </tr>
+            <tr>
+              <td><b>R2</b> · Anchored VWAP</td>
+              <td>Price vs swing-low anchored VWAP</td>
+              <td class="num">30%</td>
+              <td>Trading above the anchor <span class="pos">+1</span></td>
+              <td>Trading below the anchor — trend warning <span class="neg">−1</span></td>
+            </tr>
+            <tr>
+              <td><b>R3</b> · VWAP Close</td>
+              <td>Previous session's final VWAP level</td>
+              <td class="num">20%</td>
+              <td>Wall visited and reclaimed <span class="pos">+1</span></td>
+              <td>Wall visited and rejected <span class="neg">−1</span></td>
+            </tr>
+            <tr>
+              <td><b>R4</b> · T-Size VWAP</td>
+              <td>Big-bar VWAP vs crowd VWAP divergence</td>
+              <td class="num">25%</td>
+              <td>Whales ≥ +0.15% above crowd <span class="pos">+1</span></td>
+              <td>Whales ≤ −0.15% below crowd <span class="neg">−1</span></td>
+            </tr>
+            <tr>
+              <td><b>Composite</b></td>
+              <td>Weighted sum of the four votes</td>
+              <td class="num">100%</td>
+              <td>Score ≥ +0.35 → <b class="pos">BUY</b> · confidence = score ÷ 0.6</td>
+              <td>Score ≤ −0.35 → <b class="neg">SELL</b> · otherwise WAIT</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="caution">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#F0B90B" stroke-width="1.7" aria-hidden="true"><path d="M12 3L2.5 20h19L12 3z" stroke-linejoin="round"/><path d="M12 9.5v4.5" stroke-linecap="round"/><circle cx="12" cy="17" r="0.4" fill="#F0B90B"/></svg>
+        <div>
+          <h3>A tendency, not a law — by design.</h3>
+          <p>You warned it yourself: a move away from VWAP sometimes has a real reason. These rules are built to stay silent in that case — R1 only fires on the <i>return</i>, R2 flips only on an actual close, R3 needs a visible reaction at the wall, R4 waits for a real divergence. When the four disagree, the desk says WAIT. Expect WAIT far more often than BUY or SELL; that's the point. Nothing here is financial advice — size positions so that being wrong is cheap.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= PINE SCRIPT ================= -->
+    <section class="block" id="pine">
+      <div class="block-head">
+        <p class="kicker">Take it to TradingView</p>
+        <h2>The same four rules as a Pine Script indicator.</h2>
+        <p>The desk above and the indicator below share one logic: identical band math, identical anchors, identical weights. Run the site for the two assets, run the script on anything else you trade.</p>
+      </div>
+
+      <div class="pine-grid">
+        <div>
+          <div class="pine-facts">
+            <div class="pine-fact"><b>Plots everything the desk watches</b><span>Session VWAP with ±1σ/±2σ bands, auto or manually anchored VWAP, the previous session's VWAP close, and the T-Size VWAP — each with its own color and label.</span></div>
+            <div class="pine-fact"><b>On-chart rule dashboard</b><span>A compact table shows each rule's state (BULLISH / BEARISH / EXTENDED / N/A) plus the live composite verdict and score.</span></div>
+            <div class="pine-fact"><b>Ten ready-made alerts</b><span>alertcondition() hooks for the composite BUY/SELL and every individual rule event, so TradingView can watch the charts for you.</span></div>
+            <div class="pine-fact"><b>Everything is an input</b><span>Session reset (day/week/month), band multiples, pivot strength, touch zone, big-bar multiple, divergence trigger and signal hold — all adjustable, defaults match this site.</span></div>
+          </div>
+          <div class="pine-actions">
+            <button type="button" class="btn btn-accent" id="copyPine">Copy Pine Script</button>
+            <button type="button" class="btn" id="dlPine">Download .pine file</button>
+          </div>
+          <ol class="steps-ol">
+            <li>Open a chart on TradingView (try <b>BTCUSDT</b> or <b>NIFTY1!</b> futures — R4 needs volume).</li>
+            <li>Open <b>Pine Editor</b> at the bottom, paste the script, click <b>Save</b>.</li>
+            <li>Click <b>Add to chart</b> — the levels, dashboard and BUY/SELL triangles appear.</li>
+            <li>Right-click the chart → <b>Add alert</b>, then pick any <b>VWAP-PREC</b> condition.</li>
+          </ol>
+        </div>
+
+        <div class="pine-code-card">
+          <div class="pine-code-head">
+            <span>vwap-precision-signals.pine · Pine Script v5</span>
+            <button type="button" id="pineToggle" aria-expanded="false" aria-controls="pineCodeWrap">Show the full Pine Script</button>
+          </div>
+          <div id="pineCodeWrap" hidden>
+            <pre id="pineCode" tabindex="0" aria-label="Full Pine Script source code"></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <footer>
+      <div class="foot-grid">
+        <div>
+          <h4>About this desk</h4>
+          <p>Signals are computed in your browser from public market data — nothing is stored, nothing is signed up for. The verdict updates only on closed bars, the same way the Pine Script evaluates on a live chart.</p>
+        </div>
+        <div>
+          <h4>Data sources</h4>
+          <ul>
+            <li>Binance public market data — BTCUSDT, 5-minute bars.</li>
+            <li>Yahoo Finance public quotes — NSEI, 15-minute bars (relayed through public CORS proxies).</li>
+            <li>Demo mode — clearly labeled synthetic data for exploring the logic.</li>
+          </ul>
+        </div>
+        <div>
+          <h4>Jump to</h4>
+          <ul>
+            <li><a href="#signals">Live signal panels</a></li>
+            <li><a href="#rules">The four rules</a></li>
+            <li><a href="#scoring">Scoring model</a></li>
+            <li><a href="#pine">Pine Script indicator</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="disclaimer">
+        Educational tool, not investment advice. VWAP readings describe where price has traded — they do not know what happens next. Markets, especially crypto and leveraged index products, can move against any model. Past behavior of a rule is no promise it repeats. Trade at your own risk.
+      </div>
+    </footer>
+  </main>
+</div>
+
+<!-- focus modal -->
+<div class="focus-modal" id="focusModal" hidden role="dialog" aria-modal="true" aria-labelledby="focusTitle">
+  <div class="focus-card">
+    <div class="focus-head">
+      <h3 id="focusTitle">Chart</h3>
+      <button type="button" class="btn" id="focusClose">Close</button>
+    </div>
+    <div class="chart-holder">
+      <canvas id="focusCanvas"></canvas>
+      <div class="chart-tip" id="focusTip" hidden></div>
+    </div>
+  </div>
+</div>
+
+<script src="engine.js"></script>
+<script src="pine-embed.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
