@@ -771,7 +771,7 @@
         html += '<div class="opt-note">No Upstox token — theoretical Black–Scholes estimate for the ' + fmt(spotNow, 0) + ' ATM strike (assumed IV ' + Math.round(IV_GUESS[key] * 100) + '%, ~' + (daysToExpiry(key) < 1 ? 'expiry day' : Math.round(daysToExpiry(key)) + 'd to expiry') + '):' +
           ' <b class="up">CE ≈ ₹' + est.ce.toFixed(1) + '</b> · <b class="down">PE ≈ ₹' + est.pe.toFixed(1) + '</b>. Paste a token for live ask prices.</div>';
       } else {
-        html += '<div class="opt-note">Paste an Upstox access token to load live option premiums.</div>';
+        html += '<div class="opt-note">Waiting for price data — the theoretical estimate appears once the index feed loads.</div>';
       }
     } else if (st.status === 'error') {
       html += '<div class="opt-note opt-err">' + st.error + '</div>';
