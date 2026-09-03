@@ -721,31 +721,27 @@
     renderOptionDesk(key);
     var und = UNDERLYING[key];
 
-    // Upstox: PUT /v2/option/chain is the full-chain endpoint; GET /v2/option/contract
-    // (flat list, no premiums) is the fallback.
+    // Upstox: GET /v2/option/contract?instrument_key=<underlying> returns the flat
+    // contract list (works on all plans). Premiums then come from market-quote.
     function fetchChain() {
-      return proxyFetch('/option/chain', { method: 'PUT', body: { underlying_instrument: und } })
+      return proxyFetch('/option/contract?instrument_key=' + encodeURIComponent(und))
         .then(function (j) {
-          var d = j.data || {};
-          var calls = d.call_options || [], puts = d.put_options || [];
-          if (!calls.length) throw new Error('empty option chain returned');
-          return { calls: calls, puts: puts, expiry: d.expiry || d.expiry_date || (calls[0] && (calls[0].expiry || calls[0].expiry_date)) || '', embedded: true };
-        })
-        .catch(function (err) {
-          if (err && err.message === 'token-expired') throw err;
-          return proxyFetch('/option/contract?underlying_instrument=' + encodeURIComponent(und))
-            .then(function (j) {
-              var list = (j.data && (j.data.items || j.data)) || [];
-              if (!Array.isArray(list) || !list.length) throw new Error('no option contracts returned');
-              var calls = [], puts = [];
-              list.forEach(function (c) {
-                var type = c.instrument_type || String(c.tradingsymbol || '').slice(-2);
-                if (type === 'CE') calls.push({ strike_price: c.strike_price, instrument_key: c.instrument_key, expiry: c.expiry });
-                else if (type === 'PE') puts.push({ strike_price: c.strike_price, instrument_key: c.instrument_key, expiry: c.expiry });
-              });
-              if (!calls.length) throw new Error('no calls in contract list');
-              return { calls: calls, puts: puts, expiry: (calls[0] && calls[0].expiry) || '', embedded: false };
-            });
+          var list = (j.data && (j.data.items || j.data)) || [];
+          if (!Array.isArray(list) || !list.length) throw new Error('no option contracts returned');
+          var today = new Date().toISOString().slice(0, 10);
+          var expiries = [];
+          list.forEach(function (c) { if (c.expiry && expiries.indexOf(c.expiry) < 0) expiries.push(c.expiry); });
+          expiries.sort();
+          var expiry = expiries.find(function (e) { return e >= today; }) || expiries[0];
+          var calls = [], puts = [];
+          list.forEach(function (c) {
+            if (c.expiry !== expiry) return;
+            var type = c.instrument_type || String(c.tradingsymbol || '').slice(-2);
+            if (type === 'CE') calls.push({ strike_price: c.strike_price, instrument_key: c.instrument_key, lot_size: c.lot_size });
+            else if (type === 'PE') puts.push({ strike_price: c.strike_price, instrument_key: c.instrument_key, lot_size: c.lot_size });
+          });
+          if (!calls.length) throw new Error('no calls in contract list for expiry ' + expiry);
+          return { calls: calls, puts: puts, expiry: expiry, embedded: false };
         });
     }
 
@@ -777,6 +773,7 @@
               return null;
             }
             var rows, quoteDone;
+            st.lot = (calls[0] && calls[0].lot_size) || LOT[key];
             if (chain.embedded) {
               rows = wanted.map(function (s) {
                 return { strike: s, ce: chainQuote(entryFor(calls, s)), pe: chainQuote(entryFor(puts, s)) };
@@ -848,7 +845,7 @@
 
     if (st.status === 'ok' && st.rows) {
       var atmRow = st.rows.filter(function (r) { return r.strike === st.atm; })[0];
-      var lot = LOT[key];
+      var lot = st.lot || LOT[key];
       html += '<div class="opt-spot">Spot ' + fmt(st.spot, a.dp) + ' · ATM ' + fmt(st.atm, 0) + '</div>';
       if (atmRow) {
         html += '<div class="opt-cards">';
