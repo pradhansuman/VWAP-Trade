@@ -686,11 +686,16 @@
 
   function extractQuote(q, instrumentKey) {
     var d = (q && q.data) || {};
-    var want = String(instrumentKey).replace('|', ':');
-    if (d[want]) return normQuote(d[want]);
-    var suffix = want.split(':').slice(1).join(':');
+    var want = String(instrumentKey);
+    var wantColon = want.replace('|', ':');
+    if (d[wantColon]) return normQuote(d[wantColon]);
     for (var k in d) {
-      if (k.split(':').slice(1).join(':') === suffix) return normQuote(d[k]);
+      var v = d[k];
+      if (v && (v.instrument_token === want || v.instrument_token === wantColon)) return normQuote(v);
+    }
+    var suffix = want.split(':').slice(1).join(':');
+    for (var k2 in d) {
+      if (k2.split(':').slice(1).join(':') === suffix) return normQuote(d[k2]);
     }
     return null;
   }
