@@ -618,17 +618,30 @@
   /* ================= DATA FLOW ================= */
 
   function fetchUpstoxCandles(a) {
-    var to = new Date().toISOString().slice(0, 10);
+    var und = encodeURIComponent(a.code);
+    var today = new Date().toISOString().slice(0, 10);
     var fromD = new Date(Date.now() - 8 * 864e5).toISOString().slice(0, 10);
-    var path = '/historical-candles/' + encodeURIComponent(a.code) + '/30minute/' + to + '/' + fromD;
-    return proxyFetch(path).then(function (j) {
-      var rows = (j.data && j.data.candles) || [];
-      if (rows.length < 50) throw new Error('too few Upstox candles');
-      var candles = rows.map(function (r) {
-        return { t: Date.parse(r[0]), o: r[1], h: r[2], l: r[3], c: r[4], v: r[5] || 0 };
+    // v3 intraday = today's 30m bars; v3 historical = previous days. Stitch both.
+    return proxyFetch('/historical-candle/intraday/' + und + '/minutes/30')
+      .then(function (j1) { return (j1.data && j1.data.candles) || []; })
+      .then(function (todayRows) {
+        return proxyFetch('/historical-candle/' + und + '/minutes/30/' + today + '/' + fromD)
+          .then(function (j2) {
+            var hist = (j2.data && j2.data.candles) || [];
+            var all = hist.concat(todayRows);
+            if (all.length < 50) throw new Error('too few Upstox candles');
+            var seen = {}, candles = [];
+            all.forEach(function (r) {
+              var t = Date.parse(r[0]);
+              if (!isFinite(t) || seen[t]) return;
+              seen[t] = 1;
+              candles.push({ t: t, o: r[1], h: r[2], l: r[3], c: r[4], v: r[5] || 0 });
+            });
+            candles.sort(function (x, y) { return x.t - y.t; });
+            if (candles.length < 50) throw new Error('too few Upstox candles after merge');
+            return { candles: candles, source: 'Upstox · ' + a.code + ' · 30m' };
+          });
       });
-      return { candles: candles, source: 'Upstox · ' + a.code + ' · 30m' };
-    });
   }
 
   function loadAsset(key, manual) {
