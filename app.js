@@ -617,8 +617,9 @@
 
   /* ================= DATA FLOW ================= */
 
-  function fetchUpstoxCandles(a) {
-    var und = encodeURIComponent(a.code);
+  function fetchUpstoxCandles(key) {
+    var a = ASSETS[key];
+    var und = encodeURIComponent(UNDERLYING[key]);
     var today = new Date().toISOString().slice(0, 10);
     var fromD = new Date(Date.now() - 8 * 864e5).toISOString().slice(0, 10);
     // v3 intraday = today's 30m bars; v3 historical = previous days. Stitch both.
@@ -649,7 +650,7 @@
     setState(key, 'loading');
     var fetcher;
     if (key === 'btc') fetcher = fetchBTC();
-    else if (state.authOk) fetcher = fetchUpstoxCandles(a).catch(function () { return fetchYahoo(a); });
+    else if (state.authOk) fetcher = fetchUpstoxCandles(key).catch(function () { return fetchYahoo(a); });
     else fetcher = fetchYahoo(a);
     return fetcher.then(function (r) {
       state.data[key] = { candles: r.candles, source: r.source, fetchedAt: Date.now(), stale: false, demo: false };
