@@ -1168,8 +1168,8 @@
       $('#pineToggle').textContent = openNow ? 'Show the full Pine Script' : 'Hide the Pine Script';
     });
 
-    // go
-    loadAll(false);
+    // go — resolve Upstox auth first so index candles use it on the very first load
+    pollAuthStatus().then(function () { loadAll(false); });
   }
 
   document.addEventListener('DOMContentLoaded', init);
