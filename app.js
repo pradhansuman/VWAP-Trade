@@ -362,6 +362,15 @@
 
     // ticker alerts are option-driven now (see refreshOptionDesk / demo path)
 
+    // projection summary line
+    var projEl = $('#proj-' + key);
+    if (projEl) {
+      var f = res.forecast;
+      projEl.textContent = f
+        ? 'Projection · next ' + f.h + ' bars: median ' + (f.medianPct >= 0 ? '+' : '') + f.medianPct.toFixed(2) + '% · 80% band ' + ((f.lo[f.h - 1] / f.p0 - 1) * 100).toFixed(2) + '%…' + ((f.hi[f.h - 1] / f.p0 - 1) * 100).toFixed(2) + '% · ' + f.upCount + ' of ' + f.k + ' similar ' + f.m + '-bar setups closed higher — statistical, not a promise.'
+        : '';
+    }
+
     drawChart(key);
     renderOptionDesk(key);
     maybeRefreshOptions(key, false);
@@ -370,7 +379,8 @@
   /* ================= CHART ================= */
 
   var SERIES = [
-    { id: 'price', label: 'Price', color: 'var(--ink)' },
+    { id: 'price', label: 'Candles', color: 'var(--ink)' },
+    { id: 'proj', label: 'Projection', color: '#F0B90B' },
     { id: 'vwap', label: 'Session VWAP', color: '#F0B90B' },
     { id: 'band', label: '±2σ band', color: 'rgba(132,142,156,.55)' },
     { id: 'avwap', label: 'Anchored VWAP', color: '#1EAEDB' },
@@ -397,8 +407,10 @@
 
     var show = state.hidden[key] || {};
     var n = d.candles.length;
+    var fh = (!show.proj && res.forecast) ? res.forecast.h : 0;
     var count = Math.min(barCount || Math.max(60, Math.min(170, Math.floor(W / 7))), n);
     var from = n - count;
+    var total = count + fh;   // candle slots + projection steps
     var s = res.series;
 
     var min = Infinity, max = -Infinity;
@@ -410,12 +422,16 @@
       if (!show.prev && isFinite(s.prevClose[i])) { if (s.prevClose[i] < min) min = s.prevClose[i]; if (s.prevClose[i] > max) max = s.prevClose[i]; }
       if (!show.tsize && isFinite(s.bigVwap[i])) { if (s.bigVwap[i] < min) min = s.bigVwap[i]; if (s.bigVwap[i] > max) max = s.bigVwap[i]; }
     }
+    if (fh) {
+      res.forecast.hi.forEach(function (v) { if (isFinite(v)) { if (v < min) min = v; if (v > max) max = v; } });
+      res.forecast.lo.forEach(function (v) { if (isFinite(v)) { if (v < min) min = v; if (v > max) max = v; } });
+    }
     var pad = (max - min) * 0.06 || 1;
     min -= pad; max += pad;
 
     var padL = 6, padR = 62, padT = 8, padB = 22;
     var iw = W - padL - padR, ih = H - padT - padB;
-    function X(i) { return padL + (i - from) / (count - 1) * iw; }
+    function X(i) { return padL + (i - from) / Math.max(total - 1, 1) * iw; }
     function Y(v) { return padT + (1 - (v - min) / (max - min)) * ih; }
 
     var ink = cssVar('--ink') || '#EAECEF';
@@ -439,7 +455,8 @@
     ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
     var xt = 5;
     for (var t = 0; t <= xt; t++) {
-      var xi = from + Math.round((count - 1) * t / xt);
+      var xi = from + Math.round((total - 1) * t / xt);
+      if (xi > n - 1) xi = n - 1;
       ctx.fillText(hhmm(d.candles[xi].t, a.tz), X(xi), H - 6);
     }
 
@@ -482,10 +499,21 @@
     if (!show.tsize && res.hasVolume) line(s.bigVwap, '#FFD000', 1.4, [5, 3]);
     if (!show.vwap) line(s.vwap, '#F0B90B', 2);
     if (!show.price) {
-      ctx.strokeStyle = ink; ctx.lineWidth = 1.6;
-      ctx.beginPath();
-      for (i = from; i < n; i++) { var x4 = X(i), y4 = Y(d.candles[i].c); i === from ? ctx.moveTo(x4, y4) : ctx.lineTo(x4, y4); }
-      ctx.stroke();
+      var slot = iw / Math.max(total - 1, 1);
+      var bw = Math.max(1.5, Math.min(9, slot * 0.62));
+      for (i = from; i < n; i++) {
+        var cd = d.candles[i];
+        var upC = cd.c >= cd.o;
+        var cx = X(i);
+        ctx.strokeStyle = upC ? '#0ECB81' : '#F6465D';
+        ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(cx, Y(cd.h)); ctx.lineTo(cx, Y(cd.l)); ctx.stroke();
+        var yO = Y(cd.o), yC = Y(cd.c);
+        var bodyTop = Math.min(yO, yC), bodyH = Math.max(Math.abs(yC - yO), 1);
+        ctx.fillStyle = upC ? 'rgba(14,203,129,.85)' : 'rgba(246,70,93,.85)';
+        ctx.fillRect(cx - bw / 2, bodyTop, bw, bodyH);
+        if (bw > 2.5) ctx.strokeRect(cx - bw / 2, bodyTop, bw, bodyH);
+      }
       // last price chip
       var lastV = d.candles[n - 1].c;
       var ly = Math.min(Math.max(Y(lastV), padT + 8), padT + ih - 8);
@@ -496,7 +524,31 @@
       ctx.fillText(fmt(lastV, a.dp), padL + iw + 6, ly);
     }
 
-    canvas.__chart = { key: key, from: from, count: count, padL: padL, padR: padR, padT: padT, padB: padB, iw: iw, ih: ih, min: min, max: max, W: W, H: H, big: !!barCount };
+    // projection: cone + median path to the right of "now"
+    if (fh) {
+      var f = res.forecast;
+      var slot2 = iw / Math.max(total - 1, 1);
+      var xNow = X(n - 1) + slot2 / 2;
+      ctx.strokeStyle = 'rgba(132,142,156,.45)';
+      ctx.setLineDash([2, 3]); ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(Math.round(xNow) + 0.5, padT); ctx.lineTo(Math.round(xNow) + 0.5, padT + ih); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.moveTo(X(n - 1), Y(f.p0));
+      for (i = 0; i < f.h; i++) ctx.lineTo(X(n + i), Y(f.hi[i]));
+      for (i = f.h - 1; i >= 0; i--) ctx.lineTo(X(n + i), Y(f.lo[i]));
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(240,185,11,.07)';
+      ctx.fill();
+      ctx.strokeStyle = ink; ctx.lineWidth = 1.4; ctx.setLineDash([5, 3]);
+      ctx.beginPath();
+      ctx.moveTo(X(n - 1), Y(f.p0));
+      for (i = 0; i < f.h; i++) ctx.lineTo(X(n + i), Y(f.median[i]));
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    canvas.__chart = { key: key, from: from, count: count, total: total, padL: padL, padR: padR, padT: padT, padB: padB, iw: iw, ih: ih, min: min, max: max, W: W, H: H, big: !!barCount };
   }
 
   function bindCrosshair(canvas, tipEl) {
@@ -505,7 +557,7 @@
       if (!cfg) return;
       var rect = canvas.getBoundingClientRect();
       var mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
-      var idx = cfg.from + Math.round((mx - cfg.padL) / cfg.iw * (cfg.count - 1));
+      var idx = cfg.from + Math.round((mx - cfg.padL) / cfg.iw * (cfg.total - 1));
       var d = state.data[cfg.key];
       if (!d || idx < 0 || idx >= d.candles.length) { tipEl.hidden = true; return; }
       var a = ASSETS[cfg.key], res = state.result[cfg.key], s = res.series;

@@ -49,6 +49,10 @@ Data loads client-side from public endpoints:
 
 The scrolling ticker at the top streams **buy/sell pressure alerts on ATM calls and puts** for Nifty, Bank Nifty and Sensex — it fires when the option ask moves **2.5%+ between refreshes** ("AGGRESSIVE" above 6%), e.g. `NIFTY 50 · BUYING 24,800 CE · ask ₹212 (+4.2%)`. Alerts come from Upstox quotes only; without a token the ticker shows an enable note instead of pretending. VWAP rule events are intentionally not on the ticker.
 
+## Candles & 12-bar projection
+
+Charts render real OHLC **candlesticks** plus a forward **projection**: the engine z-scores the last 4 closed bars' returns, finds the 15 most similar historical windows, and plots the median of what price did over the next 12 bars with an 80% percentile cone — annotated with how many of those setups continued up. This is transparent pattern statistics plus recent volatility, **not** a prediction of the future; treat it as context, and the on-chart line says so.
+
 ## Verification
 
 - `engine.js`: 32 unit checks pass (session envelope invariants, band ordering, anchor reset semantics, no-volume fallback, week/month resets, tiny history, empty input, idea sanity).

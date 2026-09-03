@@ -547,3 +547,12 @@ table.opt-strip { width: 100%; border-collapse: collapse; margin-top: 10px; font
   .hero-head h1 { font-size: 27px; }
   .verdict-box { text-align: left; }
 }
+
+/* projection summary line */
+.proj-line {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--ink-muted);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+}

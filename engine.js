@@ -251,11 +251,80 @@
       series: { vwap: vwap, sig: sig, up2: vwap.map(function (x, k) { return x + opts.bandMult2 * sig[k]; }), lo2: vwap.map(function (x, k) { return x - opts.bandMult2 * sig[k]; }), aVwap: aVwap, bigVwap: bigVwap, prevClose: prevClose, z: z, divg: divg },
       score: score, verdict: verdict, confidence: confidence,
       rules: rules, idea: idea, events: events.filter(function (e) { return e.i <= evalIdx && e.i > evalIdx - opts.holdBars * 2; }),
-      hasVolume: vReal, sessionOf: sessionOf
+      hasVolume: vReal, sessionOf: sessionOf,
+      forecast: forecast(candles, {})
     };
   }
 
-  var API = { analyze: analyze, defaults: DEFAULTS, sessionKey: sessionKey };
+  /* ---- 12-bar projection: similar-pattern matching + volatility context.
+   * Finds the k historical windows whose last-m returns most resemble the
+   * current shape (z-scored, so only pattern matters), averages what price
+   * did over the next h bars, and reports the percentile band. Deterministic;
+   * no randomness. This is statistics, not a prediction of the future. ---- */
+  function forecast(candles, opts) {
+    var o = Object.assign({ m: 4, h: 12, k: 15, volLookback: 120 }, opts || {});
+    var n = candles.length;
+    if (n < o.m + o.h + 40) return null;
+    var closes = [], i, j;
+    for (i = 0; i < n; i++) closes.push(candles[i].c);
+    var r = [0];
+    for (i = 1; i < n; i++) r.push(closes[i] / closes[i - 1] - 1);
+    var lastClosed = n - 2;                     // last bar is forming
+    if (lastClosed < o.m + 2) return null;
+    function shape(arr) {
+      var mean = 0;
+      for (var a = 0; a < arr.length; a++) mean += arr[a];
+      mean /= arr.length;
+      var v = 0;
+      for (var b = 0; b < arr.length; b++) v += (arr[b] - mean) * (arr[b] - mean);
+      var sd = Math.sqrt(v / arr.length) || 1e-9;
+      return arr.map(function (x) { return (x - mean) / sd; });
+    }
+    var cur = shape(r.slice(lastClosed - o.m + 1, lastClosed + 1));
+    var cands = [];
+    for (i = o.m; i <= lastClosed - o.h; i++) {
+      var zs = shape(r.slice(i - o.m + 1, i + 1));
+      var d2 = 0;
+      for (j = 0; j < o.m; j++) d2 += (zs[j] - cur[j]) * (zs[j] - cur[j]);
+      cands.push({ i: i, d: Math.sqrt(d2) });
+    }
+    cands.sort(function (a, b) { return a.d - b.d; });
+    var matches = cands.slice(0, o.k);
+    if (!matches.length) return null;
+    var paths = matches.map(function (m0) {
+      var out = [], cum = 0;
+      for (j = 1; j <= o.h; j++) {
+        cum += r[m0.i + j] || 0;
+        out.push(Math.exp(cum) - 1);
+      }
+      return out;
+    });
+    function pct(arr, p) {
+      var s = arr.slice().sort(function (a, b) { return a - b; });
+      var idx = (s.length - 1) * p, lo = Math.floor(idx), hi = Math.ceil(idx);
+      return s[lo] + (s[hi] - s[lo]) * (idx - lo);
+    }
+    var median = [], p10 = [], p90 = [];
+    for (j = 0; j < o.h; j++) {
+      var col = paths.map(function (p) { return p[j]; });
+      median.push(pct(col, 0.5)); p10.push(pct(col, 0.1)); p90.push(pct(col, 0.9));
+    }
+    var p0 = closes[n - 1];
+    var upCount = paths.filter(function (p) { return p[o.h - 1] > 0; }).length;
+    var vv = r.slice(Math.max(1, n - 1 - o.volLookback), n - 1).filter(function (x) { return isFinite(x); });
+    var mu = vv.reduce(function (a, b) { return a + b; }, 0) / vv.length;
+    var sd = Math.sqrt(vv.reduce(function (a, b) { return a + (b - mu) * (b - mu); }, 0) / vv.length);
+    return {
+      m: o.m, h: o.h, k: matches.length, p0: p0,
+      medianPct: median[o.h - 1] * 100, upCount: upCount,
+      median: median.map(function (x) { return p0 * Math.exp(x); }),
+      lo: p10.map(function (x) { return p0 * Math.exp(x); }),
+      hi: p90.map(function (x) { return p0 * Math.exp(x); }),
+      volMu: mu, volSd: sd
+    };
+  }
+
+  var API = { analyze: analyze, forecast: forecast, defaults: DEFAULTS, sessionKey: sessionKey };
   if (typeof module !== 'undefined' && module.exports) module.exports = API;
   if (typeof window !== 'undefined') window.VWAPEngine = API;
 })(typeof window !== 'undefined' ? window : globalThis);
