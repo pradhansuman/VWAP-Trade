@@ -55,6 +55,8 @@
     result: {},        // key -> engine result
     hidden: {},        // key -> {seriesName:bool}
     opt: {},           // key -> option-desk state (indices only)
+    daily: {},         // key -> overnight-gap statistics (1y daily candles)
+    dailyBusy: {},     // key -> fetch-in-progress guard
     demoOpt: {},       // key -> synthetic option state (demo mode)
     authOk: false,     // Upstox connected (server-side auth)
     prevVerdict: {},   // key -> last verdict (for flip alerts)
@@ -617,6 +619,33 @@
 
   /* ================= DATA FLOW ================= */
 
+  function fetchDaily(key) {
+    var und = encodeURIComponent(UNDERLYING[key]);
+    var today = new Date().toISOString().slice(0, 10);
+    var yearAgo = new Date(Date.now() - 365 * 864e5).toISOString().slice(0, 10);
+    return proxyFetch('/v3/historical-candle/' + und + '/days/1/' + today + '/' + yearAgo)
+      .then(function (j) {
+        var rows = (j.data && j.data.candles) || [];
+        if (rows.length < 60) throw new Error('not enough daily history');
+        rows.sort(function (x, y) { return x[0] < y[0] ? -1 : 1; });
+        var gaps = [];
+        for (var i = 1; i < rows.length; i++) gaps.push(rows[i][1] / rows[i - 1][4] - 1);
+        function pct(arr, p) {
+          var s = arr.slice().sort(function (a, b) { return a - b; });
+          var idx = (s.length - 1) * p, lo = Math.floor(idx), hi = Math.ceil(idx);
+          return s[lo] + (s[hi] - s[lo]) * (idx - lo);
+        }
+        var up = gaps.filter(function (g) { return g > 0; }).length;
+        return {
+          n: gaps.length,
+          upRate: up / gaps.length,
+          avg: gaps.reduce(function (a, b) { return a + b; }, 0) / gaps.length,
+          med: pct(gaps, 0.5), p10: pct(gaps, 0.1), p90: pct(gaps, 0.9),
+          fetchedAt: Date.now()
+        };
+      });
+  }
+
   function fetchUpstoxCandles(key) {
     var a = ASSETS[key];
     var und = encodeURIComponent(UNDERLYING[key]);
@@ -653,12 +682,14 @@
     else if (state.authOk) fetcher = fetchUpstoxCandles(key).catch(function () { return fetchYahoo(a); });
     else fetcher = fetchYahoo(a);
     return fetcher.then(function (r) {
+      if (state.mode !== 'live') return;   // user switched to demo while fetching
       state.data[key] = { candles: r.candles, source: r.source, fetchedAt: Date.now(), stale: false, demo: false };
       state.countdown[key] = a.refreshSec;
       renderAsset(key);
       maybeRefreshOptions(key, false);
       if (manual) flashStatus(a.name + ' updated');
     }).catch(function (err) {
+      if (state.mode !== 'live') return;
       if (state.data[key] && state.data[key].candles) {
         state.data[key].stale = true;
         state.countdown[key] = ASSETS[key].refreshSec * 2;
@@ -980,6 +1011,33 @@
             html += '<div class="opt-note">Mechanical premium plan: exit fully at stop, book half at T1, trail the rest to T2. Index invalidation: ' + a.name + ' ' + (side === 'ce' ? 'below ' : 'above ') + fmt(spotStop, a.dp) + ' (VWAP ±2σ). Mechanical rules, not advice.</div>';
           }
           html += '</div>';
+
+          // ---- BTST: buy today, sell tomorrow (overnight gap statistics) ----
+          var dly = state.data[key] && state.data[key].demo
+            ? { n: 250, upRate: 0.52, med: 0.0004, p10: -0.0032, p90: 0.0036, demo: true }
+            : (state.daily[key] && !state.daily[key].failed ? state.daily[key] : null);
+          html += '<div class="opt-plan opt-btst">';
+          html += '<div class="opt-head"><span class="k">BTST · buy today, sell tomorrow</span><span class="opt-chip">' + name + ' ' + fmt(st.atm, 0) + ' · ' + (side === 'ce' ? 'calls' : 'puts') + '</span>' + (cond ? '<span class="opt-chip">conditional · verdict WAIT</span>' : '') + '</div>';
+          if (dly) {
+            var expMed = dly.med * 0.5 * 100;
+            html += '<div class="opt-note">Entry at close: ₹' + fmt(e0, 1) + ' (₹' + fmt(e0 * lot, 0) + ' / lot). Overnight gaps, last ' + dly.n + ' sessions: ' + Math.round(dly.upRate * 100) + '% opened higher · median gap ' + (dly.med >= 0 ? '+' : '') + (dly.med * 100).toFixed(2) + '% · 80% of gaps within ' + (dly.p10 * 100).toFixed(2) + '%…' + (dly.p90 * 100).toFixed(2) + '%. ATM premium moves ≈ half the gap (delta ~0.5) minus one night of decay' + (dly.demo ? ' · demo stats' : '') + '.</div>';
+            html += '<div class="opt-note">Exit rule: sell into the first 15–30 minutes of the next session — the overnight gap is the trade. Hard stop: premium −' + OPT_STOP + '%. If today is expiry day, buy the next weekly expiry instead.</div>';
+          } else if (state.daily[key] && state.daily[key].failed) {
+            html += '<div class="opt-note">Overnight-gap statistics unavailable for this index right now.</div>';
+          } else {
+            html += '<div class="opt-note">Loading one-year overnight-gap statistics…</div>';
+          }
+          html += '</div>';
+          if (!dly && !(state.daily[key] && state.daily[key].failed) && !state.dailyBusy[key]) {
+            state.dailyBusy[key] = true;
+            fetchDaily(key).then(function (g) {
+              state.daily[key] = g;
+              renderOptionDesk(key);
+            }).catch(function () {
+              state.daily[key] = { failed: true, fetchedAt: Date.now() };
+              renderOptionDesk(key);
+            }).then(function () { delete state.dailyBusy[key]; });
+          }
         }
       }
       html += '<table class="opt-strip"><thead><tr><th>Strike</th><th>CE ask</th><th>PE ask</th></tr></thead><tbody>';
