@@ -14,7 +14,7 @@ No build step, no dependencies:
 
 Data loads client-side from public endpoints:
 - **Bitcoin** — Binance public market data, BTCUSDT 5-minute bars (3 host fallbacks), auto-refresh 60s.
-- **Nifty 50** — Yahoo Finance public quotes, NSEI 15-minute bars, relayed through public CORS proxies (4-attempt chain), auto-refresh 5 min. The NSE spot index publishes no volume, so **Rule 4 reads N/A there** — use NIFTY futures on TradingView for the full four-rule read.
+- **Nifty 50 / Bank Nifty / Sensex** — Upstox 30-minute candles from your connected account (primary); Yahoo Finance public quotes via CORS relays as fallback; auto-refresh 5 min. The NSE spot index publishes no volume, so **Rule 4 reads N/A there** — use NIFTY futures on TradingView for the full four-rule read.
 - If a feed is slow or blocked, the panel shows a loading skeleton, then a "Feed unavailable" card with **Retry** and **Load demo data** (clearly labeled synthetic data, animated, for exploring the logic). A stale feed downgrades to a warning with 2× backoff instead of blanking out.
 
 ## Files

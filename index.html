@@ -73,7 +73,7 @@
         <article class="panel" id="panel-nifty">
           <div class="panel-head">
             <div class="asset-id">
-              <div class="asset-code">NSEI · Index · 15m bars</div>
+              <div class="asset-code">NSEI · Index · 30m bars</div>
               <h2 class="asset-name">Nifty 50</h2>
               <div class="price-row">
                 <span class="price" id="price-nifty">—</span>
@@ -124,7 +124,7 @@
         <article class="panel" id="panel-banknifty">
           <div class="panel-head">
             <div class="asset-id">
-              <div class="asset-code">NSEBANK · Index · 15m bars</div>
+              <div class="asset-code">NSEBANK · Index · 30m bars</div>
               <h2 class="asset-name">Bank Nifty</h2>
               <div class="price-row">
                 <span class="price" id="price-banknifty">—</span>
@@ -176,7 +176,7 @@
         <article class="panel" id="panel-sensex">
           <div class="panel-head">
             <div class="asset-id">
-              <div class="asset-code">BSESN · Index · 15m bars</div>
+              <div class="asset-code">BSESN · Index · 30m bars</div>
               <h2 class="asset-name">Sensex</h2>
               <div class="price-row">
                 <span class="price" id="price-sensex">—</span>
@@ -441,7 +441,8 @@
           <h4>Data sources</h4>
           <ul>
             <li>Binance public market data — BTCUSDT, 5-minute bars.</li>
-            <li>Yahoo Finance public quotes — NSEI, NSEBANK and BSESN, 15-minute bars (relayed through public CORS proxies).</li>
+            <li>Upstox (your connected account) — NSEI, NSEBANK and BSESN 30-minute candles and option chain.</li>
+            <li>Yahoo Finance public quotes — index candle fallback when Upstox is disconnected.</li>
             <li>Demo mode — clearly labeled synthetic data for exploring the logic.</li>
           </ul>
         </div>

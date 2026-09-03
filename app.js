@@ -617,10 +617,27 @@
 
   /* ================= DATA FLOW ================= */
 
+  function fetchUpstoxCandles(a) {
+    var to = new Date().toISOString().slice(0, 10);
+    var fromD = new Date(Date.now() - 8 * 864e5).toISOString().slice(0, 10);
+    var path = '/historical-candles/' + encodeURIComponent(a.code) + '/30minute/' + to + '/' + fromD;
+    return proxyFetch(path).then(function (j) {
+      var rows = (j.data && j.data.candles) || [];
+      if (rows.length < 50) throw new Error('too few Upstox candles');
+      var candles = rows.map(function (r) {
+        return { t: Date.parse(r[0]), o: r[1], h: r[2], l: r[3], c: r[4], v: r[5] || 0 };
+      });
+      return { candles: candles, source: 'Upstox · ' + a.code + ' · 30m' };
+    });
+  }
+
   function loadAsset(key, manual) {
     var a = ASSETS[key];
     setState(key, 'loading');
-    var fetcher = key === 'btc' ? fetchBTC() : fetchYahoo(ASSETS[key]);
+    var fetcher;
+    if (key === 'btc') fetcher = fetchBTC();
+    else if (state.authOk) fetcher = fetchUpstoxCandles(a).catch(function () { return fetchYahoo(a); });
+    else fetcher = fetchYahoo(a);
     return fetcher.then(function (r) {
       state.data[key] = { candles: r.candles, source: r.source, fetchedAt: Date.now(), stale: false, demo: false };
       state.countdown[key] = a.refreshSec;
