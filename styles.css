@@ -556,3 +556,14 @@ table.opt-strip { width: 100%; border-collapse: collapse; margin-top: 10px; font
   font-variant-numeric: tabular-nums;
   line-height: 1.5;
 }
+
+.opt-plan { margin-top: 10px; border-top: 1px dashed var(--border); padding-top: 9px; }
+.plan-cell .s {
+  display: block;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: var(--ink-muted);
+  margin-top: 1px;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}

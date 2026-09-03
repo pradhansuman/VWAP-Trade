@@ -730,6 +730,7 @@
     sensex: 'BSE_INDEX|SENSEX'
   };
   var LOT = { nifty: 75, banknifty: 35, sensex: 20 };
+  var OPT_STOP = 30, OPT_T1 = 50, OPT_T2 = 100;   // buyer plan: premium stop / targets (%)
   var IV_GUESS = { nifty: 0.12, banknifty: 0.15, sensex: 0.12 };
   var EXPIRY_DOW = { nifty: 2, banknifty: 2, sensex: 4 }; // Tue / Tue / Thu — verify on the exchange site
 
@@ -947,6 +948,39 @@
             '</div>';
         });
         html += '</div>';
+
+        // buyer plan: entry / stop / targets on the premium the desk favors
+        var resK = state.result[key];
+        var verdict = resK ? resK.verdict : 'WAIT';
+        var score = resK ? resK.score : 0;
+        var side = (verdict === 'SELL' || (verdict === 'WAIT' && score < 0)) ? 'pe' : 'ce';
+        var pq = atmRow[side];
+        if (pq && pq.ask != null) {
+          var name = side.toUpperCase();
+          var e0 = pq.ask;
+          var stopP = e0 * (1 - OPT_STOP / 100);
+          var t1 = e0 * (1 + OPT_T1 / 100);
+          var t2 = e0 * (1 + OPT_T2 / 100);
+          var cond = verdict === 'WAIT';
+          function planCell(k, v, sub) {
+            return '<div class="plan-cell"><span class="k">' + k + '</span><span class="v">' + v + '</span><span class="s">' + sub + '</span></div>';
+          }
+          html += '<div class="opt-plan">';
+          html += '<div class="opt-head"><span class="k">Plan · as a buyer</span><span class="opt-chip">' + name + ' ' + fmt(st.atm, 0) + '</span>' +
+            (cond ? '<span class="opt-chip">conditional · verdict WAIT</span>' : '<span class="opt-chip ' + (side === 'ce' ? 'chip-bull' : 'chip-bear') + '">' + verdict + '</span>') + '</div>';
+          html += '<div class="plan">';
+          html += planCell('Entry', '₹' + fmt(e0, 1), '₹' + fmt(e0 * lot, 0) + ' / lot');
+          html += planCell('Stop', '₹' + fmt(stopP, 1) + ' (−' + OPT_STOP + '%)', '₹' + fmt(stopP * lot, 0) + ' / lot');
+          html += planCell('Target 1', '₹' + fmt(t1, 1) + ' (+' + OPT_T1 + '%)', '₹' + fmt(t1 * lot, 0) + ' / lot');
+          html += planCell('Target 2', '₹' + fmt(t2, 1) + ' (+' + OPT_T2 + '%)', '₹' + fmt(t2 * lot, 0) + ' / lot');
+          html += '</div>';
+          var sr = resK ? resK.series : null, ei = resK ? resK.evalIdx : 0;
+          if (sr) {
+            var spotStop = side === 'ce' ? (sr.vwap[ei] - 2 * sr.sig[ei]) : (sr.vwap[ei] + 2 * sr.sig[ei]);
+            html += '<div class="opt-note">Mechanical premium plan: exit fully at stop, book half at T1, trail the rest to T2. Index invalidation: ' + a.name + ' ' + (side === 'ce' ? 'below ' : 'above ') + fmt(spotStop, a.dp) + ' (VWAP ±2σ). Mechanical rules, not advice.</div>';
+          }
+          html += '</div>';
+        }
       }
       html += '<table class="opt-strip"><thead><tr><th>Strike</th><th>CE ask</th><th>PE ask</th></tr></thead><tbody>';
       st.rows.forEach(function (r) {
