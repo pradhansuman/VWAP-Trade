@@ -649,13 +649,13 @@
   function fetchUpstoxCandles(key) {
     var a = ASSETS[key];
     var und = encodeURIComponent(UNDERLYING[key]);
-    var today = new Date().toISOString().slice(0, 10);
+    var istToday = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
     var fromD = new Date(Date.now() - 8 * 864e5).toISOString().slice(0, 10);
     // v3 intraday = today's 30m bars; v3 historical = previous days. Stitch both.
     return proxyFetch('/v3/historical-candle/intraday/' + und + '/minutes/30')
       .then(function (j1) { return (j1.data && j1.data.candles) || []; })
       .then(function (todayRows) {
-        return proxyFetch('/v3/historical-candle/' + und + '/minutes/30/' + today + '/' + fromD)
+        return proxyFetch('/v3/historical-candle/' + und + '/minutes/30/' + istToday + '/' + fromD)
           .then(function (j2) {
             var hist = (j2.data && j2.data.candles) || [];
             var all = hist.concat(todayRows);
@@ -842,43 +842,50 @@
     var und = UNDERLYING[key];
 
     // Upstox: GET /v2/option/contract?instrument_key=<underlying> returns the flat
-    // contract list (works on all plans). Premiums then come from market-quote.
+    // contract list across all expiries. "Today" is IST — using UTC here picked
+    // just-expired contracts after midnight.
+    function istTodayStr() {
+      return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
+    }
+
     function fetchChain() {
       return proxyFetch('/option/contract?instrument_key=' + encodeURIComponent(und))
         .then(function (j) {
           var list = (j.data && (j.data.items || j.data)) || [];
           if (!Array.isArray(list) || !list.length) throw new Error('no option contracts returned');
-          var today = new Date().toISOString().slice(0, 10);
-          var expiries = [];
-          list.forEach(function (c) { if (c.expiry && expiries.indexOf(c.expiry) < 0) expiries.push(c.expiry); });
-          expiries.sort();
-          var expiry = expiries.find(function (e) { return e >= today; }) || expiries[0];
-          var calls = [], puts = [];
-          list.forEach(function (c) {
-            if (c.expiry !== expiry) return;
-            var type = c.instrument_type || String(c.tradingsymbol || '').slice(-2);
-            if (type === 'CE') calls.push({ strike_price: c.strike_price, instrument_key: c.instrument_key, lot_size: c.lot_size });
-            else if (type === 'PE') puts.push({ strike_price: c.strike_price, instrument_key: c.instrument_key, lot_size: c.lot_size });
-          });
-          if (!calls.length) throw new Error('no calls in contract list for expiry ' + expiry);
-          return { calls: calls, puts: puts, expiry: expiry, embedded: false };
+          st.rawList = list; st.listAt = Date.now();
+          return list;
         });
     }
 
-    function chainQuote(entry) {
-      if (!entry) return null;
-      var md = entry.option_market_data || {};
-      var ask = md.ask_price != null ? md.ask_price : (md.ask != null ? md.ask : null);
-      var ltp = md.ltp != null ? md.ltp : null;
-      if (ltp == null && ask == null) return null;
-      return { ltp: ltp != null ? ltp : ask, ask: ask != null ? ask : ltp };
+    function listForExpiry(list, expiry) {
+      var calls = [], puts = [];
+      list.forEach(function (c) {
+        if (c.expiry !== expiry) return;
+        var type = c.instrument_type || String(c.tradingsymbol || '').slice(-2);
+        if (type === 'CE') calls.push({ strike_price: c.strike_price, instrument_key: c.instrument_key, lot_size: c.lot_size });
+        else if (type === 'PE') puts.push({ strike_price: c.strike_price, instrument_key: c.instrument_key, lot_size: c.lot_size });
+      });
+      return { calls: calls, puts: puts };
     }
 
-    return fetchChain()
-      .then(function (chain) {
-        var calls = chain.calls, puts = chain.puts;
+    var needList = !(st.rawList && st.listAt && Date.now() - st.listAt < 10 * 60e3);
+    var listP = needList ? fetchChain() : Promise.resolve(st.rawList);
+
+    return listP
+      .then(function (list) {
+        var istToday = istTodayStr();
+        var expiries = [];
+        list.forEach(function (c) { if (c.expiry && c.expiry >= istToday && expiries.indexOf(c.expiry) < 0) expiries.push(c.expiry); });
+        expiries.sort();
+        if (!expiries.length) throw new Error('no future expiries available');
+        st.allExpiries = expiries;
+        var expiry = (st.chosenExpiry && expiries.indexOf(st.chosenExpiry) >= 0) ? st.chosenExpiry : expiries[0];
+        st.expiry = expiry;
+        var parts = listForExpiry(list, expiry);
+        var calls = parts.calls, puts = parts.puts;
         var strikes = calls.map(function (c) { return +c.strike_price; }).sort(function (a, b) { return a - b; });
-        st.expiry = chain.expiry;
+        if (!strikes.length) throw new Error('no strikes for expiry ' + expiry);
         return proxyFetch('/market-quote/quotes?instrument_key=' + encodeURIComponent(und))
           .then(function (q) {
             var spot = extractQuote(q, und);
@@ -894,23 +901,16 @@
             }
             var rows, quoteDone;
             st.lot = (calls[0] && calls[0].lot_size) || LOT[key];
-            if (chain.embedded) {
-              rows = wanted.map(function (s) {
-                return { strike: s, ce: chainQuote(entryFor(calls, s)), pe: chainQuote(entryFor(puts, s)) };
+            rows = wanted.map(function (s) {
+              var c = entryFor(calls, s), p = entryFor(puts, s);
+              return { strike: s, ceKey: c && c.instrument_key, peKey: p && p.instrument_key };
+            });
+            var keys = [];
+            rows.forEach(function (r) { if (r.ceKey) keys.push(r.ceKey); if (r.peKey) keys.push(r.peKey); });
+            quoteDone = proxyFetch('/market-quote/quotes?instrument_key=' + encodeURIComponent(keys.join(',')))
+              .then(function (q2) {
+                rows.forEach(function (r) { r.ce = extractQuote(q2, r.ceKey); r.pe = extractQuote(q2, r.peKey); });
               });
-              quoteDone = Promise.resolve(null);
-            } else {
-              rows = wanted.map(function (s) {
-                var c = entryFor(calls, s), p = entryFor(puts, s);
-                return { strike: s, ceKey: c && c.instrument_key, peKey: p && p.instrument_key };
-              });
-              var keys = [];
-              rows.forEach(function (r) { if (r.ceKey) keys.push(r.ceKey); if (r.peKey) keys.push(r.peKey); });
-              quoteDone = proxyFetch('/market-quote/quotes?instrument_key=' + encodeURIComponent(keys.join(',')))
-                .then(function (q2) {
-                  rows.forEach(function (r) { r.ce = extractQuote(q2, r.ceKey); r.pe = extractQuote(q2, r.peKey); });
-                });
-            }
             return quoteDone.then(function () {
               var atmRow = rows.filter(function (r) { return r.strike === atm; })[0];
               if (atmRow) {
@@ -959,7 +959,15 @@
     var a = ASSETS[key];
     var st = state.opt[key] || {};
     var html = '<div class="opt-head"><span class="k">Option desk · buyer</span>';
-    if (st.expiry) html += '<span class="opt-chip">expiry ' + st.expiry + '</span>';
+    if (st.allExpiries && st.allExpiries.length) {
+      html += '<select class="opt-expiry" id="optexp-' + key + '" aria-label="Choose expiry">';
+      st.allExpiries.forEach(function (e) {
+        html += '<option value="' + e + '"' + (e === st.expiry ? ' selected' : '') + '>' + e + (e === st.allExpiries[0] ? ' · nearest' : '') + '</option>';
+      });
+      html += '</select>';
+    } else if (st.expiry) {
+      html += '<span class="opt-chip">expiry ' + st.expiry + '</span>';
+    }
     if (st.status === 'loading') html += '<span class="opt-chip">loading…</span>';
     html += '</div>';
 
@@ -1062,6 +1070,17 @@
       html += '<div class="opt-note">Fetching option chain from Upstox…</div>';
     }
     box.innerHTML = html;
+    var sel = $('#optexp-' + key);
+    if (sel) {
+      sel.addEventListener('change', function () {
+        var st2 = state.opt[key];
+        if (st2) {
+          st2.chosenExpiry = sel.value;
+          st2.prevCeAsk = null; st2.prevPeAsk = null;
+          maybeRefreshOptions(key, true);
+        }
+      });
+    }
   }
 
   /* ================= LIVE ALERT TICKER (option buy/sell calls) ================= */
