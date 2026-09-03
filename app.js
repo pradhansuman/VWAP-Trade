@@ -623,10 +623,10 @@
     var today = new Date().toISOString().slice(0, 10);
     var fromD = new Date(Date.now() - 8 * 864e5).toISOString().slice(0, 10);
     // v3 intraday = today's 30m bars; v3 historical = previous days. Stitch both.
-    return proxyFetch('/historical-candle/intraday/' + und + '/minutes/30')
+    return proxyFetch('/v3/historical-candle/intraday/' + und + '/minutes/30')
       .then(function (j1) { return (j1.data && j1.data.candles) || []; })
       .then(function (todayRows) {
-        return proxyFetch('/historical-candle/' + und + '/minutes/30/' + today + '/' + fromD)
+        return proxyFetch('/v3/historical-candle/' + und + '/minutes/30/' + today + '/' + fromD)
           .then(function (j2) {
             var hist = (j2.data && j2.data.candles) || [];
             var all = hist.concat(todayRows);
@@ -757,7 +757,7 @@
       init.body = JSON.stringify(opts.body);
       init.headers['Content-Type'] = 'application/json';
     }
-    return fetch(PROXY + encodeURIComponent('https://api.upstox.com/v2' + path), init)
+    return fetch(PROXY + encodeURIComponent('https://api.upstox.com' + (path.indexOf('/v3/') === 0 ? '' : '/v2') + path), init)
       .then(function (r) {
         return r.json().catch(function () { return {}; }).then(function (j) {
           if (r.status === 401) throw new Error('not-connected');
