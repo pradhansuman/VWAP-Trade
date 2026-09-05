@@ -211,8 +211,15 @@
         o.pe.ask = Math.max(5, o.pe.ask * (1 + jump()));
         o.ce.ltp = o.ce.ask * 0.985;
         o.pe.ltp = o.pe.ask * 0.985;
+        o.ce.volume = Math.max(2e4, Math.min(3e6, (o.ce.volume || 6e5) * (0.85 + Math.random() * 0.4)));
+        o.pe.volume = Math.max(2e4, Math.min(2.6e6, (o.pe.volume || 5.4e5) * (0.85 + Math.random() * 0.4)));
+        o.ce.oi = Math.max(1e5, Math.min(5e6, (o.ce.oi || 2.4e6) * (0.98 + Math.random() * 0.05)));
+        o.pe.oi = Math.max(1e5, Math.min(4.5e6, (o.pe.oi || 2.1e6) * (0.98 + Math.random() * 0.05)));
+        var dT = yearsTo(o.expiry);
+        o.ce.delta = greekDelta('CE', c, o.atm, dT, ivSolve('CE', c, o.atm, dT, o.ce.ltp));
+        o.pe.delta = greekDelta('PE', c, o.atm, dT, ivSolve('PE', c, o.atm, dT, o.pe.ltp));
         evaluateOptionAlerts(key, o.atm, o.expiry, o.ce, o.pe, o.prevCeAsk, o.prevPeAsk);
-        state.opt[key] = { status: 'ok', expiry: o.expiry, spot: c, atm: o.atm, rows: [{ strike: o.atm, ce: o.ce, pe: o.pe }], updatedAt: Date.now() };
+        state.opt[key] = { status: 'ok', expiry: o.expiry, spot: c, atm: o.atm, stepv: STRIDE[key], rows: [{ strike: o.atm, ce: o.ce, pe: o.pe }], updatedAt: Date.now() };
       }
       renderAsset(key);
     });
@@ -723,13 +730,12 @@
       state.data[k] = { candles: r.candles, source: r.source + ' · DEMO', fetchedAt: Date.now(), stale: false, demo: true };
     });
     // seed synthetic option desks for the three indices
-    var STRIDE = { nifty: 50, banknifty: 100, sensex: 100 };
     var OPTBASE = { nifty: { ce: 185, pe: 178 }, banknifty: { ce: 460, pe: 445 }, sensex: { ce: 395, pe: 385 } };
     ['nifty', 'banknifty', 'sensex'].forEach(function (k) {
       var spot = state.data[k].candles[state.data[k].candles.length - 1].c;
       var atm = Math.round(spot / STRIDE[k]) * STRIDE[k];
       var ob = OPTBASE[k];
-      state.demoOpt[k] = { atm: atm, expiry: 'demo-weekly', ce: { ltp: ob.ce, ask: ob.ce * 1.005 }, pe: { ltp: ob.pe, ask: ob.pe * 1.005 } };
+      state.demoOpt[k] = { atm: atm, expiry: nextExpiryISO(2), ce: { ltp: ob.ce, ask: ob.ce * 1.005, volume: 6e5, oi: 2.4e6 }, pe: { ltp: ob.pe, ask: ob.pe * 1.005, volume: 5.4e5, oi: 2.1e6 } };
     });
     KEYS.forEach(function (k) { renderAsset(k); });
     state.timers.demo = setInterval(stepDemo, 4000);
@@ -761,6 +767,7 @@
     sensex: 'BSE_INDEX|SENSEX'
   };
   var LOT = { nifty: 75, banknifty: 35, sensex: 20 };
+  var STRIDE = { nifty: 50, banknifty: 100, sensex: 100 };
   var OPT_STOP = 30, OPT_T1 = 50, OPT_T2 = 100;   // buyer plan: premium stop / targets (%)
   var IV_GUESS = { nifty: 0.12, banknifty: 0.15, sensex: 0.12 };
   var EXPIRY_DOW = { nifty: 2, banknifty: 2, sensex: 4 }; // Tue / Tue / Thu — verify on the exchange site
@@ -817,7 +824,7 @@
   function normQuote(x) {
     if (!x || x.last_price == null) return null;
     var ask = x.depth && x.depth.sell && x.depth.sell[0] ? x.depth.sell[0].price : null;
-    return { ltp: x.last_price, ask: ask != null ? ask : x.last_price };
+    return { ltp: x.last_price, ask: ask != null ? ask : x.last_price, volume: x.volume || 0, oi: x.oi || 0 };
   }
   function stepGuess(strikes) {
     var gaps = [];
@@ -894,7 +901,8 @@
             var atm = strikes.reduce(function (best, s) { return Math.abs(s - spot.ltp) < Math.abs(best - spot.ltp) ? s : best; }, strikes[0]);
             st.atm = atm;
             var stepv = stepGuess(strikes);
-            var wanted = strikes.filter(function (s) { return Math.abs(s - atm) <= 2 * stepv; }).slice(0, 5);
+            var wanted = strikes.filter(function (s) { return Math.abs(s - atm) <= 5 * stepv; }).slice(0, 11);
+            st.stepv = stepv;
             function entryFor(arr, s) {
               for (var i = 0; i < arr.length; i++) if (+arr[i].strike_price === s) return arr[i];
               return null;
@@ -912,6 +920,16 @@
                 rows.forEach(function (r) { r.ce = extractQuote(q2, r.ceKey); r.pe = extractQuote(q2, r.peKey); });
               });
             return quoteDone.then(function () {
+              var T = yearsTo(st.expiry);
+              rows.forEach(function (r) {
+                ['ce', 'pe'].forEach(function (side) {
+                  var oq = r[side];
+                  if (!oq) return;
+                  var iv = ivSolve(side.toUpperCase(), st.spot, r.strike, T, oq.ltp != null ? oq.ltp : oq.ask);
+                  oq.iv = iv;
+                  oq.delta = greekDelta(side.toUpperCase(), st.spot, r.strike, T, iv);
+                });
+              });
               var atmRow = rows.filter(function (r) { return r.strike === atm; })[0];
               if (atmRow) {
                 evaluateOptionAlerts(key, atm, st.expiry, atmRow.ce, atmRow.pe, st.prevCeAsk, st.prevPeAsk);
@@ -952,6 +970,48 @@
     var d = (EXPIRY_DOW[key] - new Date().getDay() + 7) % 7;
     return d === 0 ? 0.3 : d;
   }
+  function ivSolve(type, S, K, T, premium) {
+    if (!isFinite(premium) || premium <= 0 || !isFinite(T) || T <= 0) return null;
+    function price(iv) {
+      var d1 = (Math.log(S / K) + (0.065 + iv * iv / 2) * T) / (iv * Math.sqrt(T));
+      var nd = function (x) { return 0.5 * (1 + erf(x / Math.SQRT2)); };
+      return type === 'CE'
+        ? S * nd(d1) - K * Math.exp(-0.065 * T) * nd(d1 - iv * Math.sqrt(T))
+        : K * Math.exp(-0.065 * T) * nd(-(d1 - iv * Math.sqrt(T))) - S * nd(-d1);
+    }
+    var lo = 0.02, hi = 3.0;
+    if (premium > price(hi) || premium < price(lo)) return null;
+    var mid;
+    for (var it = 0; it < 40; it++) {
+      mid = (lo + hi) / 2;
+      if (price(mid) < premium) lo = mid; else hi = mid;
+    }
+    return (lo + hi) / 2;
+  }
+  function greekDelta(type, S, K, T, iv) {
+    if (!iv) return null;
+    var d1 = (Math.log(S / K) + (0.065 + iv * iv / 2) * T) / (iv * Math.sqrt(T));
+    var nd = function (x) { return 0.5 * (1 + erf(x / Math.SQRT2)); };
+    return type === 'CE' ? nd(d1) : nd(d1) - 1;
+  }
+  function yearsTo(expiryStr) {
+    if (!expiryStr) return null;
+    var exp = Date.parse(expiryStr + 'T15:30:00+05:30');
+    if (!isFinite(exp)) return null;
+    return Math.max((exp - Date.now()) / (365 * 864e5), 0.5 / 365);
+  }
+  function fmtCompact(x) {
+    if (x == null || !isFinite(x) || x <= 0) return '—';
+    if (x >= 1e7) return (x / 1e7).toFixed(2) + 'Cr';
+    if (x >= 1e5) return (x / 1e5).toFixed(1) + 'L';
+    if (x >= 1e3) return (x / 1e3).toFixed(1) + 'K';
+    return String(Math.round(x));
+  }
+  function nextExpiryISO(dow) {
+    var d = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+    d.setDate(d.getDate() + ((dow - d.getDay() + 7) % 7));
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  }
 
   function renderOptionDesk(key) {
     var box = $('#opt-' + key);
@@ -980,10 +1040,12 @@
         ['ce', 'pe'].forEach(function (side) {
           var q = atmRow[side];
           var name = side.toUpperCase();
+          var greeks = q && q.delta != null ? 'Δ ' + q.delta.toFixed(2) + ' · Vol ' + fmtCompact(q.volume) + ' · OI ' + fmtCompact(q.oi) : 'no greeks';
           html += '<div class="opt-card ' + (side === 'ce' ? 'opt-ce' : 'opt-pe') + '">' +
             '<span class="k">BUY ' + name + ' ' + fmt(st.atm, 0) + '</span>' +
             '<span class="v">' + (q ? '₹' + fmt(q.ask, 1) : '—') + '</span>' +
             '<span class="s">' + (q ? 'ask · ltp ₹' + fmt(q.ltp, 1) + ' · per lot ₹' + fmt(q.ask * lot, 0) : 'no quote') + '</span>' +
+            '<span class="s">' + greeks + '</span>' +
             '</div>';
         });
         html += '</div>';
@@ -1048,12 +1110,29 @@
           }
         }
       }
-      html += '<table class="opt-strip"><thead><tr><th>Strike</th><th>CE ask</th><th>PE ask</th></tr></thead><tbody>';
-      st.rows.forEach(function (r) {
-        var atmMark = r.strike === st.atm ? ' class="atm"' : '';
-        html += '<tr' + atmMark + '><td>' + fmt(r.strike, 0) + (r.strike === st.atm ? ' •' : '') + '</td><td>' + (r.ce ? fmt(r.ce.ask, 1) : '—') + '</td><td>' + (r.pe ? fmt(r.pe.ask, 1) : '—') + '</td></tr>';
+      var tableRows = st.rows.filter(function (r) { return Math.abs(r.strike - st.atm) <= 2 * (st.stepv || 50); });
+      function top3(side) {
+        return st.rows.filter(function (r) { return r[side] && r[side].volume > 0; })
+          .sort(function (a, b) { return b[side].volume - a[side].volume; }).slice(0, 3);
+      }
+      var topCE = top3('ce'), topPE = top3('pe');
+      function inTop(side, r) { return (side === 'ce' ? topCE : topPE).indexOf(r) >= 0; }
+      html += '<div class="opt-scroll"><table class="opt-strip"><thead><tr><th>Strike</th><th>CE ask</th><th>CE Δ</th><th>CE Vol</th><th>CE OI</th><th>PE ask</th><th>PE Δ</th><th>PE Vol</th><th>PE OI</th></tr></thead><tbody>';
+      tableRows.forEach(function (r) {
+        var cls = r.strike === st.atm ? ' class="atm"' : '';
+        html += '<tr' + cls + '><td>' + fmt(r.strike, 0) + (r.strike === st.atm ? ' •' : '') + '</td>' +
+          '<td>' + (r.ce ? fmt(r.ce.ask, 1) : '—') + '</td>' +
+          '<td class="' + (inTop('ce', r) ? 'top-ce' : '') + '">' + (r.ce && r.ce.delta != null ? r.ce.delta.toFixed(2) : '—') + '</td>' +
+          '<td class="' + (inTop('ce', r) ? 'top-ce' : '') + '">' + (r.ce ? fmtCompact(r.ce.volume) : '—') + '</td>' +
+          '<td>' + (r.ce ? fmtCompact(r.ce.oi) : '—') + '</td>' +
+          '<td>' + (r.pe ? fmt(r.pe.ask, 1) : '—') + '</td>' +
+          '<td class="' + (inTop('pe', r) ? 'top-pe' : '') + '">' + (r.pe && r.pe.delta != null ? r.pe.delta.toFixed(2) : '—') + '</td>' +
+          '<td class="' + (inTop('pe', r) ? 'top-pe' : '') + '">' + (r.pe ? fmtCompact(r.pe.volume) : '—') + '</td>' +
+          '<td>' + (r.pe ? fmtCompact(r.pe.oi) : '—') + '</td></tr>';
       });
-      html += '</tbody></table>';
+      html += '</tbody></table></div>';
+      html += '<div class="opt-top3"><span class="k">Top CE by volume</span> ' + (topCE.length ? topCE.map(function (r, i) { return '<b>' + fmt(r.strike, 0) + '</b> ' + fmtCompact(r.ce.volume) + (i < topCE.length - 1 ? ' ·' : ''); }).join(' ') : '—') + '</div>';
+      html += '<div class="opt-top3"><span class="k">Top PE by volume</span> ' + (topPE.length ? topPE.map(function (r, i) { return '<b>' + fmt(r.strike, 0) + '</b> ' + fmtCompact(r.pe.volume) + (i < topPE.length - 1 ? ' ·' : ''); }).join(' ') : '—') + '</div>';
       html += '<div class="opt-note">Buyer pays the ask' + (st.expiry === 'demo-weekly' ? ' · demo data' : '') + '. Lot size ' + lot + ' (verify on the exchange). Updated ' + (st.updatedAt ? new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit' }).format(st.updatedAt) : '—') + '.</div>';
     } else if (!state.authOk) {
       var spotNow = state.data[key] ? state.data[key].candles[state.data[key].candles.length - 1].c : null;

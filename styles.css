@@ -567,3 +567,37 @@ table.opt-strip { width: 100%; border-collapse: collapse; margin-top: 10px; font
   font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
 }
+
+/* option chain table: delta / volume / OI */
+.opt-scroll { overflow-x: auto; }
+.opt-scroll .opt-strip th, .opt-scroll .opt-strip td { white-space: nowrap; text-align: right; }
+.opt-scroll .opt-strip th:first-child, .opt-scroll .opt-strip td:first-child { text-align: left; }
+.top-ce { color: var(--good); font-weight: 700; }
+.top-pe { color: var(--bad); font-weight: 700; }
+.opt-top3 {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--ink-muted);
+  margin-top: 6px;
+  font-variant-numeric: tabular-nums;
+}
+.opt-top3 .k {
+  font-family: var(--font);
+  font-size: 9.5px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  font-weight: 700;
+  margin-right: 6px;
+}
+.opt-top3 b { color: var(--ink); }
+.opt-expiry {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--ink);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  padding: 3px 10px;
+  cursor: pointer;
+}
